@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools==84.2.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "log-viewer-mcp"
+version = "0.1.0"
+description = "线上游戏服 SFS2X 日志查询 MCP 服务：跳板机服务（Log_MCP_Server）、本地 MCP（Local_MCP）与 Token_CLI"
+requires-python = ">=3.11"
+# 依赖全部锁定精确版本。基础依赖即研发机器上 Local_MCP 所需，不需要任何 extra。
+dependencies = [
+    "mcp==1.29.1",
+    "httpx==0.28.1",
+]
+
+[project.optional-dependencies]
+# 跳板机上的 Log_MCP_Server 与 Token_CLI（另需基础依赖中的 mcp）
+server = [
+    "starlette==1.10.0",
+    "uvicorn==0.54.0",
+    "asyncssh==2.24.1",
+    "mysql-connector-python==26.10.0",
+]
+test = [
+    "pytest==9.2.0",
+    "pytest-asyncio==1.4.1.post1",
+    "hypothesis==6.170.14",
+]
+
+[project.scripts]
+log-viewer-mcp-local = "log_viewer_mcp.local.main:main"
+log-viewer-mcp-server = "log_viewer_mcp.server.app:main"
+log-viewer-mcp-token = "log_viewer_mcp.token_cli.main:main"
+
+[tool.setuptools.packages.find]
+include = ["log_viewer_mcp*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_default_fixture_loop_scope = "function"

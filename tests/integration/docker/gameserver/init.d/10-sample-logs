@@ -1,0 +1,20 @@
+#!/bin/bash
+# 写入集成测试的样例日志（任务 5.2）。由 entrypoint.sh 在启动 sshd 之前运行；测试也可以经 SSH 以 root
+# 再次运行它，把被测试改动过的样例恢复原状（tests/integration/itenv.py 的 reset_samples）。
+#
+# samples.tar 与 manifest.json 在构建镜像时由 tests/integration/sample_logs.py 生成（Dockerfile 的 samples 阶段），
+# 内容、时间戳与文件清单见该模块与 manifest.json。这里先清空五个日志目录与符号链接目标目录，再解包：
+# tar 以 root 解包时保留属主、权限（0777）与 mtime，目录的 mtime 在其内容解包后设置。
+set -euo pipefail
+
+root=/usr/local/ds/SFS2X
+samples=/opt/testenv/samples
+
+for d in logs logpushinit loganalys polsarlog ziplogs; do
+  mkdir -p "$root/$d"
+  find "$root/$d" -mindepth 1 -delete
+done
+rm -rf /opt/testenv/outside
+
+tar -x -p --same-owner -f "$samples/samples.tar" -C /
+echo "10-sample-logs: 已写入样例日志" >&2

@@ -1,0 +1,58 @@
+# log-viewer-mcp 跳板机服务配置示例：复制为 deploy/config/config.toml 后修改，同目录放 SSH 私钥 ssh_key。
+# 未注释的项必须填写；注释掉的项可省略，写出的值即默认值。
+
+# 容器使用宿主机网络：address 为 0.0.0.0 或跳板机的内网地址，port 即跳板机上的端口
+listen = { address = "0.0.0.0", port = 8999 }
+# 游戏服上压缩日志（*.tar.gz）的目录，各类型共用。没有压缩日志的环境删去此项；
+# 配置了但游戏服上没有该目录时，当作没有压缩日志，只查非压缩目录
+zip_dir = "/usr/local/ds/SFS2X/ziplogs"
+# server_timezone = "-02:00"                        # 游戏服时区，只接受 ±HH:MM；不要写 IANA 名 Etc/GMT-2，它表示 UTC+2
+# tokens_file = "/etc/log-viewer-mcp/tokens.json"   # token 登记文件，由 Token_CLI 维护
+
+[admin_db]                                          # 管理库，只查询 tbl_webserver
+host = "10.0.0.2"
+user = "logview"
+database = "admin"
+password = "<密码>"
+# port = 3306
+# password_file = "/etc/log-viewer-mcp/db_password" # 改用密码文件时删去 password，二者只写一项
+
+# [ssh]                                             # 登录游戏服
+# user = "root"
+# port = 22
+# key_file = "/etc/log-viewer-mcp/ssh_key"          # 私钥，不能有口令
+# known_hosts = "/etc/log-viewer-mcp/known_hosts"   # 配置后严格校验主机公钥；默认不配置，不校验
+# connect_timeout_s = 10                            # SSH 连接超时（秒）
+
+# [limits]
+# max_servers = 10                                  # 单次查询的 svr_id 个数上限
+# max_time_span_h = 24                              # 时间跨度上限（小时）
+# default_lookback_h = 1                            # 未给时间时回溯的小时数
+# point_window_min = 5                              # 只给 at_time 时前后各取的分钟数
+# max_patterns = 10                                 # 包含、排除模式各自的个数上限
+# max_pattern_length = 256                          # 单个模式的长度上限
+# max_context_lines = 100                           # 上下文行数上限
+# query_timeout_s = 40                              # 单次调用时限（秒），须小于 Local_MCP 的 LOG_MCP_CALL_TIMEOUT_S（50）
+# max_scan_bytes = 8589934592                       # 单台游戏服单次读取的文件总大小上限（8 GiB）
+# max_concurrent = 8                                # 全局并发查询上限，超出返回 BUSY
+# max_concurrent_per_server = 2                     # 单台游戏服的并发查询上限
+
+# [results]                                         # 跳板机上的结果文件
+# dir = "/tmp/query_log"                            # 容器内目录，启动时清空
+# ttl_min = 60                                      # 未被取走的结果保留分钟数
+# cleanup_interval_min = 5                          # 清理间隔（分钟）
+
+# [audit]                                           # 审计日志，按天写 audit-YYYY-MM-DD.jsonl
+# dir = "/var/log/log-viewer-mcp/audit"             # 与 compose.yaml 的挂载点一致
+# retention_days = 90                               # 保留天数
+
+# 键即工具的 log_type 取值。每种类型：
+#   dir      非压缩日志目录（必填），其中为 smartfox.log 与 smartfox.log.<时间戳>
+#   suffix   压缩文件名中的类型后缀，默认空串；共用同一压缩目录的类型之间不能相同
+#   zip_dir  该类型自己的压缩目录（可选），省略时用上面的 zip_dir
+# <时间戳> 可以是 yyyy-MM-dd、yyyy-MM-dd-HH 或 yyyy-MM-dd-HH-mm（按天、小时、分钟滚动），按文件名自动识别，无需配置
+[log_types]
+normal = { dir = "/usr/local/ds/SFS2X/logs", suffix = "" }
+login = { dir = "/usr/local/ds/SFS2X/logpushinit", suffix = ".logpushinit" }
+analysis = { dir = "/usr/local/ds/SFS2X/loganalys", suffix = ".loganalys" }
+pulsar = { dir = "/usr/local/ds/SFS2X/polsarlog", suffix = ".polsarlog" }

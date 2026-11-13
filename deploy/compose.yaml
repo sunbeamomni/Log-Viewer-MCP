@@ -1,0 +1,16 @@
+# 在 deploy/ 中执行：docker compose up -d
+# 先在 deploy/config/ 中放 config.toml（复制 config.example.toml 修改）与 ssh_key。
+# 优先拉取 GitHub Actions 构建好的镜像；拉取不到（如跳板机不能访问 ghcr.io）时用本地源码构建。
+# 强制用本地源码构建：docker compose up -d --build；换镜像地址：设置环境变量 LOG_VIEWER_MCP_IMAGE。
+services:
+  log-viewer-mcp:
+    image: ${LOG_VIEWER_MCP_IMAGE:-ghcr.io/sunbeamomni/log-viewer-mcp:latest}
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    init: true                    # 转发 SIGTERM，回收子进程
+    restart: unless-stopped       # 异常退出后自动重启
+    stop_grace_period: 30s        # 长于服务的停机等待（10 + 5 秒）
+    network_mode: host            # 宿主机网络，不写 ports；监听 config.toml 的 listen.address、listen.port
+    volumes:
+      - ./config:/etc/log-viewer-mcp                 # 配置、私钥与 tokens.json（Token_CLI 要写入）
+      - ./audit:/var/log/log-viewer-mcp/audit        # 审计日志
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "5" } }

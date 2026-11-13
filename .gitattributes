@@ -1,0 +1,5 @@
+# 集成测试镜像中的脚本与配置在 Linux 容器中执行，必须保持 LF
+tests/integration/docker/** text eol=lf
+*.sh text eol=lf
+# 部署到 Linux 跳板机的 Dockerfile、compose 与配置示例
+deploy/** text eol=lf

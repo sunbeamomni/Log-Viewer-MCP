@@ -1,0 +1,21 @@
+# 集成测试中生产镜像（deploy/Dockerfile）的 Config_Dir，只用于测试：挂载为容器中的 /etc/log-viewer-mcp（只读）。
+# tokens.json 在默认位置，登记测试专用 token（明文见 compose.yaml 中 runner 的 LVM_IT_IMAGE_TOKEN）。
+# 私钥取自 keys 卷；不配置 known_hosts（不校验主机公钥）；结果与审计目录用默认值。
+
+listen = { address = "0.0.0.0", port = 8080 }
+zip_dir = "/usr/local/ds/SFS2X/ziplogs"
+
+[admin_db]
+host = "172.30.77.10"
+user = "logview"
+database = "admin"
+password = "test-only-logview-password"
+
+[ssh]
+key_file = "/keys/client/id_ed25519"
+
+[log_types]
+normal = { dir = "/usr/local/ds/SFS2X/logs", suffix = "" }
+login = { dir = "/usr/local/ds/SFS2X/logpushinit", suffix = ".logpushinit" }
+analysis = { dir = "/usr/local/ds/SFS2X/loganalys", suffix = ".loganalys" }
+pulsar = { dir = "/usr/local/ds/SFS2X/polsarlog", suffix = ".polsarlog" }

@@ -1,0 +1,10 @@
+#!/bin/sh
+# 以 root 读取生产镜像服务的审计（服务以 root 运行，审计文件为 0600 root，测试用户读不到）。
+# 测试运行容器中经 sudo 调用（sudoers 只允许不带参数运行本脚本）；审计卷只读挂载在 /image-audit。
+# 按文件名（日期）顺序拼接输出全部 audit-*.jsonl；没有文件时输出为空。
+set -eu
+for f in /image-audit/audit-*.jsonl; do
+  if [ -f "$f" ]; then
+    cat -- "$f"
+  fi
+done

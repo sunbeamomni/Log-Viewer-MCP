@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<configuration scan="false" scanPeriod="5 seconds">
+    <appender name="fileAppender" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <encoding>UTF-8</encoding>
+        <file>logs/smartfox.log</file>
+        <encoder>
+            <pattern>%d | %-5level | %thread | %logger{40} | %msg%n</pattern>
+        </encoder>
+        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+            <fileNamePattern>logs/smartfox.log.%d{yyyy-MM-dd-HH-mm}</fileNamePattern>
+        </rollingPolicy>
+    </appender>
+
+    <appender name="pushinitAppender" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <encoding>UTF-8</encoding>
+        <file>logpushinit/smartfox.log</file>
+        <encoder>
+            <pattern>%d | %-5level | %thread | %logger{40} | %msg%n</pattern>
+        </encoder>
+        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+            <fileNamePattern>logpushinit/smartfox.log.%d{yyyy-MM-dd-HH-mm}</fileNamePattern>
+        </rollingPolicy>
+    </appender>
+    <appender name="analysAppender" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <encoding>UTF-8</encoding>
+        <file>loganalys/smartfox.log</file>
+        <encoder>
+            <pattern>%d | %-5level | %thread | %logger{40} | %msg%n</pattern>
+        </encoder>
+        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+            <fileNamePattern>loganalys/smartfox.log.%d{yyyy-MM-dd-HH-mm}</fileNamePattern>
+        </rollingPolicy>
+    </appender>
+    <appender name="polsarLog" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <encoding>UTF-8</encoding>
+        <file>polsarlog/smartfox.log</file>
+        <encoder>
+            <pattern>%d | %-5level | %thread | %logger{40} | %msg%n</pattern>
+        </encoder>
+        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+            <fileNamePattern>polsarlog/smartfox.log.%d{yyyy-MM-dd-HH-mm}</fileNamePattern>
+        </rollingPolicy>
+    </appender>
+
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <!-- encoders are assigned by default the type
+             ch.qos.logback.classic.encoder.PatternLayoutEncoder -->
+        <encoder>
+            <pattern>%d [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <appender name="DB" class="ch.qos.logback.classic.db.DBAppender">
+        <connectionSource class="ch.qos.logback.core.db.DriverManagerConnectionSource">
+            <driverClass>com.mysql.jdbc.Driver</driverClass>
+            <url>jdbc:mysql://127.0.0.1:3306/cokdb_global</url>
+            <user>root</user>
+            <password>******</password>
+        </connectionSource>
+    </appender>
+
+    <appender name="ASYNCPushinitAppender" class="com.mmobuilder.server.logger.SharedAsyncAppender">
+        <appender-ref ref="pushinitAppender"/>
+        <neverBlock>false</neverBlock>
+    </appender>
+    <appender name="ASYNCAnalysAppender" class="com.mmobuilder.server.logger.SharedAsyncAppender">
+        <appender-ref ref="analysAppender"/>
+        <neverBlock>false</neverBlock>
+    </appender>
+    <appender name="ASYNCFileAppender" class="com.mmobuilder.server.logger.SharedAsyncAppender">
+        <appender-ref ref="fileAppender"/>
+        <neverBlock>false</neverBlock>
+    </appender>
+    <appender name="ASYNCPolsarLog" class="com.mmobuilder.server.logger.SharedAsyncAppender">
+        <queueSize>4096</queueSize>
+        <appender-ref ref="polsarLog"/>
+        <neverBlock>false</neverBlock>
+    </appender>
+
+    <logger name="com.smartfoxserver.bitswarm.sessions.DefaultSessionManager" additivity="false" level="DEBUG">
+        <appender-ref ref="ASYNCFileAppender"/>
+    </logger>
+    <logger name="ANALYSISLOG" additivity="false" level="INFO">
+        <appender-ref ref="ASYNCAnalysAppender"/>
+    </logger>
+    <logger name="PUSHINIT" additivity="false" level="INFO">
+        <appender-ref ref="ASYNCPushinitAppender"/>
+    </logger>
+    <logger name="com.readygo.pulsar.producer.service.LogSendService" additivity="false" level="INFO">
+        <appender-ref ref="ASYNCPolsarLog"/>
+    </logger>
+
+    <logger name="slg.pantheon.pulsar.producer.service.LogSendService" additivity="false" level="INFO">
+        <appender-ref ref="ASYNCPolsarLog"/>
+    </logger>
+
+    <root level="INFO">
+        <appender-ref ref="ASYNCFileAppender"/>
+<!--        <appender-ref ref="STDOUT"/>-->
+    </root>
+</configuration>

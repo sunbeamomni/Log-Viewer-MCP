@@ -1,0 +1,10 @@
+# 合并到 ~/.codex/config.toml；先执行 uv tool install git+https://github.com/sunbeamomni/Log-Viewer-MCP.git
+[mcp_servers.log-viewer]
+command = "log-viewer-mcp-local"
+tool_timeout_sec = 60        # 不小于 Service_Call_Timeout 50 秒加 DELETE 的 5 秒
+startup_timeout_sec = 20     # 启动时不下载任何东西，比默认 10 秒略宽即可
+
+[mcp_servers.log-viewer.env]
+LOG_MCP_SERVICE_URL = "http://<跳板机地址>:8999"
+LOG_MCP_TOKEN = "<token>"
+LOG_MCP_RESULT_DIR = "query_log"

@@ -1,0 +1,189 @@
+# 集成测试环境（只用于测试，所有密码与密钥都是测试专用）。用法见同目录 README.md：
+#   docker compose -f tests/integration/compose.yaml build
+#   docker compose -f tests/integration/compose.yaml run --rm runner
+name: log-viewer-mcp-it
+
+x-gameserver-build: &gameserver-build
+  context: ./docker/gameserver
+  # 样例日志生成器 sample_logs.py 所在的目录（Dockerfile 的 samples 阶段）
+  additional_contexts:
+    itsrc: .
+
+x-gameserver-common: &gameserver-common
+  init: true
+  depends_on:
+    keys:
+      condition: service_completed_successfully
+  volumes:
+    - keys:/keys:ro
+  healthcheck:
+    test: ["CMD-SHELL", "test -f /run/testenv-ready && bash -c '</dev/tcp/127.0.0.1/22'"]
+    interval: 2s
+    timeout: 3s
+    retries: 60
+    start_period: 5s
+
+services:
+  # 生成测试专用的 SSH 密钥与 known_hosts（写入 keys 卷，已存在则跳过）
+  keys:
+    build:
+      <<: *gameserver-build
+      target: base
+    image: log-viewer-mcp-it/gameserver:base
+    entrypoint: ["/opt/testenv/gen-keys.sh"]
+    environment:
+      GS_HOSTS: "gs=172.30.77.11 gs-noionice=172.30.77.12 gs-grepspy=172.30.77.13"
+      TEST_UID: "10001"
+    volumes:
+      - keys:/keys
+    network_mode: none
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: test-only-root-password
+      MYSQL_DATABASE: admin
+      MYSQL_USER: logview
+      MYSQL_PASSWORD: test-only-logview-password
+    volumes:
+      - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      testnet:
+        ipv4_address: 172.30.77.10
+    healthcheck:
+      # 初始化阶段的临时服务器不监听 TCP，用 127.0.0.1 才能等到正式启动
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 2s
+      timeout: 5s
+      retries: 90
+      start_period: 10s
+
+  # 与线上一致的游戏服（svr_id 1001、2001、4294967295）
+  gs:
+    <<: *gameserver-common
+    build:
+      <<: *gameserver-build
+      target: base
+    image: log-viewer-mcp-it/gameserver:base
+    hostname: gs
+    environment:
+      GS_NAME: gs
+    networks:
+      testnet:
+        ipv4_address: 172.30.77.11
+
+  # 去掉 ionice 的变体（svr_id 1002）
+  gs-noionice:
+    <<: *gameserver-common
+    build:
+      <<: *gameserver-build
+      target: noionice
+    image: log-viewer-mcp-it/gameserver:noionice
+    hostname: gs-noionice
+    environment:
+      GS_NAME: gs-noionice
+    networks:
+      testnet:
+        ipv4_address: 172.30.77.12
+
+  # grep 换成记录 argv 的替身（svr_id 1003）；记录目录经 grep-argv 卷共享给测试运行容器
+  gs-grepspy:
+    <<: *gameserver-common
+    build:
+      <<: *gameserver-build
+      target: grepspy
+    image: log-viewer-mcp-it/gameserver:grepspy
+    hostname: gs-grepspy
+    environment:
+      GS_NAME: gs-grepspy
+    volumes:
+      - keys:/keys:ro
+      - grep-argv:/var/log/grep-argv
+    networks:
+      testnet:
+        ipv4_address: 172.30.77.13
+
+  # 生产镜像（deploy/Dockerfile，忽略规则 deploy/Dockerfile.dockerignore），以镜像自己的 ENTRYPOINT 与 CMD 启动，
+  # 容器内以 root 运行。与生产不同：接入测试网络并使用固定地址（宿主机网络访问不到测试网络中的游戏服与 MySQL），
+  # 生产 deploy/compose.yaml 的宿主机网络由 tests/unit/test_deploy.py 检查。
+  # Config_Dir 为测试专用（docker/server-image/config：config.toml 与预置测试 token 的 tokens.json），
+  # 私钥取自 keys 卷，不配置 known_hosts；审计目录（默认路径）经 image-audit 卷只读共享给 runner。
+  server-image:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
+    image: log-viewer-mcp-it/server-image
+    init: true
+    depends_on:
+      keys:
+        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
+    volumes:
+      - ./docker/server-image/config:/etc/log-viewer-mcp:ro
+      - keys:/keys:ro
+      - image-audit:/var/log/log-viewer-mcp/audit
+    networks:
+      testnet:
+        ipv4_address: 172.30.77.20
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8080), timeout=2).close()"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  # 测试运行容器：以 uid 10001（非 root）运行全部 pytest
+  runner:
+    build:
+      context: ../..
+      dockerfile: tests/integration/docker/runner/Dockerfile
+    image: log-viewer-mcp-it/runner
+    depends_on:
+      mysql:
+        condition: service_healthy
+      gs:
+        condition: service_healthy
+      gs-noionice:
+        condition: service_healthy
+      gs-grepspy:
+        condition: service_healthy
+      server-image:
+        condition: service_healthy
+    environment:
+      LVM_IT: "1"
+      LVM_IT_DB_HOST: 172.30.77.10
+      LVM_IT_DB_PORT: "3306"
+      LVM_IT_DB_NAME: admin
+      LVM_IT_DB_USER: logview
+      LVM_IT_DB_PASSWORD: test-only-logview-password
+      LVM_IT_SSH_USER: root
+      LVM_IT_SSH_PORT: "22"
+      LVM_IT_SSH_KEY: /keys/client/id_ed25519
+      LVM_IT_KNOWN_HOSTS: /keys/known_hosts
+      LVM_IT_KNOWN_HOSTS_WRONG: /keys/known_hosts_wrong
+      LVM_IT_GS_IP: 172.30.77.11
+      LVM_IT_GS_NOIONICE_IP: 172.30.77.12
+      LVM_IT_GS_GREPSPY_IP: 172.30.77.13
+      LVM_IT_GS_UNREACHABLE_IP: 172.30.77.99
+      LVM_IT_GREP_ARGV_DIR: /grep-argv
+      LVM_IT_IMAGE_URL: http://172.30.77.20:8080
+      LVM_IT_IMAGE_TOKEN: lvm-it-image-TEST-ONLY-token   # 测试专用，摘要登记在 docker/server-image/config/tokens.json
+    volumes:
+      - keys:/keys:ro
+      - grep-argv:/grep-argv
+      - image-audit:/image-audit:ro
+    networks:
+      testnet:
+        ipv4_address: 172.30.77.100
+
+networks:
+  testnet:
+    ipam:
+      config:
+        - subnet: 172.30.77.0/24
+
+volumes:
+  keys:
+  grep-argv:
+  image-audit:

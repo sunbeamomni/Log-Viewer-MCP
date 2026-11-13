@@ -1,0 +1,15 @@
+# 测试运行镜像的构建上下文是仓库根目录；BuildKit 读取与 Dockerfile 同名的 .dockerignore
+.git
+.venv
+venv
+.kiro
+.vscode
+.idea
+**/__pycache__
+**/*.py[cod]
+*.egg-info
+build
+dist
+.pytest_cache
+.hypothesis
+query_log

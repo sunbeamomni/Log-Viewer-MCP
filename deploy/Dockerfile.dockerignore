@@ -1,0 +1,7 @@
+# deploy/Dockerfile 专用（路径相对仓库根目录）：只放入构建需要的文件，
+# .git、.venv、tests、deploy/config、deploy/audit、query_log 等都不进入构建上下文。
+*
+!pyproject.toml
+!log_viewer_mcp/
+**/__pycache__
+**/*.py[cod]
