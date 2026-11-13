@@ -9,7 +9,7 @@
 
 每个例子新建一个临时目录 root，Local_Result_Dir 为 root/query_log（有时预先创建），root 下另放一个
 outside 目录与若干诱饵文件。运行前后对比 Local_Result_Dir 之外的目录树与诱饵文件内容，应完全相同；
-handle、文件名与字节数都合法的 svr_id 下载到 <Local_Result_Dir>/<handle>/<文件名>（realpath 在其内），
+handle、文件名与字节数都合法的 svr_id 下载到 <Local_Result_Dir>/<env>/<handle>/<文件名>（realpath 在其内），
 其余标 DOWNLOAD_FAILED，且不发请求、不在 Local_Result_Dir 中留下任何文件。
 """
 
@@ -33,6 +33,7 @@ from log_viewer_mcp.common.formats import (
 )
 from log_viewer_mcp.local.main import LocalMCP
 from tests.unit.test_local import payload
+from tests.unit.test_local import ENV
 from tests.unit.test_local import settings as local_settings
 from tests.unit.test_local_download import FAILED_ENTRY, summary
 
@@ -161,7 +162,8 @@ def result_tree(result_dir: Path) -> set[str]:
 
 def run(local: LocalMCP, result: Any) -> Any:
     async def go() -> Any:
-        return await local._handle_result("search_logs", result, anyio.current_time() + 10.0)
+        return await local._handle_result(local.local_settings.envs[0], "search_logs", result,
+                                          anyio.current_time() + 10.0)
 
     return asyncio.run(go())
 
@@ -213,11 +215,11 @@ def test_local_writes_only_validated_paths_inside_result_dir(tmp_path_factory, d
         if valid:
             assert entry["status"] == "ok", entry
             local_path = entry["local_path"]
-            assert local_path == os.path.join(str(result_dir), handle, sent["file"])
+            assert local_path == os.path.join(str(result_dir), ENV, handle, sent["file"])
             real = os.path.realpath(local_path)
             assert os.path.normcase(os.path.commonpath([base, real])) == os.path.normcase(base) and real != base
             assert Path(local_path).read_bytes() == body_of(size)
-            expected_files.add(os.path.join(handle, sent["file"]))
+            expected_files.add(os.path.join(ENV, handle, sent["file"]))
             expected_gets.append(("GET", f"/results/{handle}/{sent['file']}"))
         else:
             assert entry["status"] == "failed", entry
@@ -230,10 +232,10 @@ def test_local_writes_only_validated_paths_inside_result_dir(tmp_path_factory, d
     if handle_ok and len(expected_files) < len(files):
         event("handle 合法且有文件被拒")
 
-    # Local_Result_Dir 之内只多出合法的 <handle>/<文件名>（没有 .part 残留）；不合法的值不触碰文件系统。
+    # Local_Result_Dir 之内只多出合法的 <env>/<handle>/<文件名>（没有 .part 残留）；不合法的值不触碰文件系统。
     created = result_tree(result_dir) - before_inside
     if expected_files:
-        assert created == expected_files | {handle}
+        assert created == expected_files | {ENV, os.path.join(ENV, handle)}
     else:
         assert created == set()
     if not precreate and not expected_files:

@@ -180,7 +180,7 @@ def test_main_cleans_up_at_startup(tmp_path, monkeypatch) -> None:
              logging.getLogger("httpx").level, logging.getLogger("httpcore").level)
     try:
         code = local_main.main({"LOG_MCP_SERVICE_URL": SERVICE_URL, "LOG_MCP_TOKEN": "startup-token-1",
-                                "LOG_MCP_RESULT_DIR": str(tmp_path / "query_log")})
+                                "LOG_MCP_RESULT_DIR": str(tmp_path / "query_log")}, home=tmp_path)
     finally:
         root_logger.handlers[:] = saved[0]
         root_logger.setLevel(saved[1])

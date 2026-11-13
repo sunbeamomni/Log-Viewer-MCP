@@ -2,12 +2,7 @@
   "mcpServers": {
     "log-viewer": {
       "type": "stdio",
-      "command": "log-viewer-mcp-local",
-      "env": {
-        "LOG_MCP_SERVICE_URL": "http://<跳板机地址>:8999",
-        "LOG_MCP_TOKEN": "${LOG_MCP_TOKEN}",
-        "LOG_MCP_RESULT_DIR": "query_log"
-      }
+      "command": "log-viewer-mcp-local"
     }
   }
 }

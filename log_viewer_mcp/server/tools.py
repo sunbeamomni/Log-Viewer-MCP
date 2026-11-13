@@ -502,8 +502,12 @@ async def search_logs(services: ToolServices, params: SearchParams, *, deadline:
 async def list_servers(services: ToolServices) -> ToolResult:
     """tbl_webserver 中的全部服务器（3.1）；读取失败返回 DB_UNAVAILABLE，不返回部分列表（3.2）。
 
+    结果另带本服务的 server_timezone（例如 GMT-2）与 log_types（log_type → 非压缩日志目录，按配置顺序），
+    供 Agent 在多套环境（各自的跳板机配置可能不同）中换算时间、选择 log_type。
+
     只读一次管理库、不登录游戏服，不占并发名额（limits.py）。
     """
+    config = services.config
     try:
         servers = await services.db.list_servers()
     except LogViewerError as e:
@@ -512,4 +516,10 @@ async def list_servers(services: ToolServices) -> ToolResult:
     except Exception:
         logger.exception("list_servers 出现未预期的异常")
         return ToolResult.failure(LogViewerError(ErrorCode.INTERNAL_ERROR))
-    return ToolResult(payload={"servers": list(servers)})
+    return ToolResult(
+        payload={
+            "server_timezone": config.timezone_label,
+            "log_types": {name: log_type.dir for name, log_type in config.log_types.items()},
+            "servers": list(servers),
+        }
+    )

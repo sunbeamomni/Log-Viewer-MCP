@@ -3,8 +3,8 @@
 在测试运行容器中：
 1. 用 Token_CLI（``python -m log_viewer_mcp.token_cli -f <tokens.json> create <user>``）为新使用者生成 token；
 2. 以子进程启动跳板机服务（``python -m log_viewer_mcp.server -c config.toml``，同 test_server_main.py），等它开始监听；
-3. 经 MCP SDK 的 stdio 客户端启动 ``python -m log_viewer_mcp.local``（环境变量 LOG_MCP_SERVICE_URL、LOG_MCP_TOKEN、
-   LOG_MCP_RESULT_DIR），依次调用 list_servers 与 search_logs（svr_id 1001 → gs）。
+3. 经 MCP SDK 的 stdio 客户端启动 ``python -m log_viewer_mcp.local``（HOME 下的环境登记文件 envs.toml 登记环境 it，
+   工作目录中的项目文件 .log-viewer.toml 选用它），依次带 env 调用 list_servers 与 search_logs（svr_id 1001 → gs）。
 
 确认：list_servers 返回管理库中的全部行；search_logs 的本地结果文件存在，内容与参照过滤
 （test_remote_e2e.grep_ref，对样例日志的内存模型）逐字节相同；跳板机 Result_Store 中该 handle 已删除；
@@ -53,7 +53,23 @@ _TOKEN_LINE = re.compile(r"^token：(\S+)$", re.MULTILINE)
 
 
 def _child_env(**extra: str) -> dict[str, str]:
-    return {**os.environ, "PYTHONPATH": str(REPO_ROOT), "PYTHONIOENCODING": "utf-8", **extra}
+    env = {k: v for k, v in os.environ.items() if not k.startswith("LOG_MCP_")}
+    return {**env, "PYTHONPATH": str(REPO_ROOT), "PYTHONIOENCODING": "utf-8", **extra}
+
+
+IT_ENV = "it"
+
+
+def write_env_files(tmp_path: Path, work: Path, service_url: str, token: str) -> Path:
+    """在 tmp_path/home 写环境登记文件（只有环境 it，权限 600），在 work 写项目文件；返回 home。"""
+    home = tmp_path / "home"
+    envs_file = home / ".log-viewer-mcp" / "envs.toml"
+    envs_file.parent.mkdir(parents=True)
+    envs_file.write_text(f'[envs.{IT_ENV}]\ndescription = "集成测试环境"\nservice_url = "{service_url}"\n'
+                         f'token = "{token}"\n', encoding="utf-8")
+    os.chmod(envs_file, 0o600)
+    (work / ".log-viewer.toml").write_text(f'envs = ["{IT_ENV}"]\n', encoding="utf-8")
+    return home
 
 
 def create_token(tokens_file: Path, user: str) -> str:
@@ -84,8 +100,8 @@ async def call_via_local(params: StdioServerParameters, errlog) -> tuple:
     async with stdio_client(params, errlog=errlog) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
-            listed = await session.call_tool("list_servers", {})
-            searched = await session.call_tool("search_logs", SEARCH_ARGS)
+            listed = await session.call_tool("list_servers", {"env": IT_ENV})
+            searched = await session.call_tool("search_logs", {"env": IT_ENV, **SEARCH_ARGS})
     return listed, searched
 
 
@@ -101,9 +117,10 @@ async def test_end_to_end_smoke(it_env: ItEnv, samples, game_servers: GameServer
     files = server.files
     work = tmp_path / "dev"
     work.mkdir()
+    home = write_env_files(tmp_path, work, files.base_url, token)
     params = StdioServerParameters(
         command=sys.executable, args=["-m", "log_viewer_mcp.local"], cwd=str(work),
-        env=_child_env(LOG_MCP_SERVICE_URL=files.base_url, LOG_MCP_TOKEN=token, LOG_MCP_RESULT_DIR="query_log"),
+        env=_child_env(HOME=str(home), LOG_MCP_RESULT_DIR="query_log"),
     )
     local_stderr = tmp_path / "local_stderr.log"
 
@@ -114,13 +131,16 @@ async def test_end_to_end_smoke(it_env: ItEnv, samples, game_servers: GameServer
     # list_servers：与管理库中的行相同（3.1）
     assert listed.isError is False
     db_rows = await AdminDb(files.load().admin_db).list_servers()
-    assert listed.structuredContent == {"servers": db_rows}
+    assert listed.structuredContent == {"env": IT_ENV, "server_timezone": "GMT-2",
+                                        "log_types": listed.structuredContent["log_types"], "servers": db_rows}
+    assert "normal" in listed.structuredContent["log_types"]
     assert {1001, 1002, 2001, 4294967295} <= {s["svr_id"] for s in db_rows}
 
     # search_logs：摘要中只有本地路径，本地文件与参照过滤逐字节相同（4.1、4.2）
     assert searched.isError is False, searched.content
     summary = searched.structuredContent
     handle = summary["result_handle"]
+    assert summary["env"] == IT_ENV
     assert summary["time_range"] == {
         "start": SEARCH_ARGS["start_time"], "end": SEARCH_ARGS["end_time"],
         "start_server": "2026-09-17 16:00:00", "end_server": "2026-09-17 16:04:00",
@@ -136,7 +156,7 @@ async def test_end_to_end_smoke(it_env: ItEnv, samples, game_servers: GameServer
         "files_read": EXPECTED_FILES, "files_skipped": [], "truncated": "none", "available_range": None,
     }
     assert os.path.isabs(local_path)
-    result_dir = (work / "query_log").resolve()
+    result_dir = (work / "query_log" / IT_ENV).resolve()
     assert Path(local_path).resolve() == result_dir / handle / "1001_normal.log"
     assert Path(local_path).read_bytes() == expected
     assert sorted(p.name for p in (result_dir / handle).iterdir()) == ["1001_normal.log"]  # 没有残留的 .part

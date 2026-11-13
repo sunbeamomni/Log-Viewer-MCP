@@ -2,9 +2,24 @@
 
 Agent 只调用本服务；本服务把调用转发给跳板机上的 Log_MCP_Server（Streamable HTTP，stateless）。
 
+多环境（一位研发对应多个项目、每个项目有线上与内网等多套跳板机服务）：
+
+- 环境登记文件（``~/.log-viewer-mcp/envs.toml``，可用 LOG_MCP_ENVS_FILE 改路径）：每个 ``[envs.<名字>]`` 写
+  description、service_url 与 token。环境名须 fullmatch ``[a-z0-9][a-z0-9-]{0,19}``（用作结果目录名；最长 20 个字符，
+  不会与 22 个字符的 Result_Handle 同名）。文件不存在时退回旧配置：LOG_MCP_SERVICE_URL 与 LOG_MCP_TOKEN 作为
+  名为 default 的一套环境。
+- 项目文件（启动时工作目录下的 ``.log-viewer.toml``，可以提交到仓库，不含 token）：``envs = [...]`` 限定本项目可用的
+  环境与顺序；没有时可用全部登记的环境。列出未登记的环境时启动失败。
+- 两个工具都多一个 ``env`` 参数（enum 为本项目可用的环境，说明中列出各自的 description）。可用环境多于一套时必填，
+  不设默认值；只有一套时可省略。``env`` 不合法时直接返回 INVALID_ARGUMENT，不发请求；合法时用该环境的
+  service_url 与 token 转发，转发前从参数中去掉 ``env``，其余参数原样转发。返回给 Agent 的 JSON 对象顶层带 ``env``。
+- 结果下载到 ``<Local_Result_Dir>/<env>/<handle>/``；清理时处理每个登记环境的子目录，以及旧版本留下的
+  ``<Local_Result_Dir>/<handle>/``。
+
 任务 10.1：
 
-- 启动配置（4.9）：从环境变量读取 LOG_MCP_SERVICE_URL、LOG_MCP_TOKEN（必填）、LOG_MCP_RESULT_DIR
+- 启动配置（4.9）：环境见上文；没有环境登记文件时从环境变量读取 LOG_MCP_SERVICE_URL、LOG_MCP_TOKEN（必填）。
+  另从环境变量读取 LOG_MCP_RESULT_DIR
   （默认 query_log，相对路径按启动时的工作目录解析）、LOG_MCP_CALL_TIMEOUT_S（50）与 LOG_MCP_RESULT_TTL_H（24）。
   缺少必填项或取值不合法时在标准错误中说明（不回显取值）并以 2 退出。
 - 日志只写标准错误（标准输出是 stdio 的 MCP 通道），格式化后的文字中 token 原文一律替换为 ``***``；
@@ -65,8 +80,9 @@ import shutil
 import stat
 import sys
 import time
-from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
+import tomllib
+from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -95,20 +111,27 @@ from log_viewer_mcp.common.tool_docs import (
 
 __all__ = [
     "DEFAULT_CALL_TIMEOUT_S",
+    "DEFAULT_ENVS_FILE",
     "DEFAULT_RESULT_DIR",
     "DEFAULT_RESULT_TTL_H",
     "ENV_CALL_TIMEOUT_S",
+    "ENV_ENVS_FILE",
+    "ENV_PARAM",
     "ENV_RESULT_DIR",
     "ENV_RESULT_TTL_H",
     "ENV_SERVICE_URL",
     "ENV_TOKEN",
+    "LEGACY_ENV_NAME",
+    "PROJECT_FILE",
     "SERVER_NAME",
+    "Environment",
     "LocalMCP",
     "LocalSettings",
     "SettingsError",
     "build_tools",
     "cleanup_expired_results",
     "configure_logging",
+    "env_input_schema",
     "load_settings",
     "main",
 ]
@@ -122,6 +145,21 @@ ENV_TOKEN = "LOG_MCP_TOKEN"
 ENV_RESULT_DIR = "LOG_MCP_RESULT_DIR"
 ENV_CALL_TIMEOUT_S = "LOG_MCP_CALL_TIMEOUT_S"
 ENV_RESULT_TTL_H = "LOG_MCP_RESULT_TTL_H"
+ENV_ENVS_FILE = "LOG_MCP_ENVS_FILE"
+
+# 环境登记文件（相对用户主目录）与项目文件（相对启动时的工作目录）。
+DEFAULT_ENVS_FILE = os.path.join(".log-viewer-mcp", "envs.toml")
+PROJECT_FILE = ".log-viewer.toml"
+# 没有环境登记文件时，LOG_MCP_SERVICE_URL 与 LOG_MCP_TOKEN 组成的那一套环境的名字与说明。
+LEGACY_ENV_NAME = "default"
+LEGACY_ENV_DESCRIPTION = "LOG_MCP_SERVICE_URL 指定的跳板机"
+# 工具参数中选择环境的键；转发给跳板机前去掉。
+ENV_PARAM = "env"
+
+# 环境名用作结果目录名：小写字母、数字与连字符，最长 20 个字符（不会与 22 个字符的 Result_Handle 同名）。
+_ENV_NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,19}")
+_MAX_DESCRIPTION_LENGTH = 200
+_ENV_KEYS = frozenset({"description", "service_url", "token"})
 
 DEFAULT_RESULT_DIR = "query_log"
 DEFAULT_CALL_TIMEOUT_S = 50.0
@@ -168,12 +206,13 @@ class SettingsError(Exception):
 
 
 @dataclass(frozen=True)
-class LocalSettings:
+class Environment:
+    """一套跳板机服务（例如 A 项目线上、A 项目内网）：名字、给 Agent 看的说明、基地址与 token。"""
+
+    name: str
+    description: str
     service_url: str  # 基地址，不以 "/" 结尾
-    token: str
-    result_dir: Path  # 绝对路径
-    call_timeout_s: float
-    result_ttl_h: float
+    token: str = field(repr=False)  # 不让 token 出现在 repr 中
 
     @property
     def mcp_url(self) -> str:
@@ -183,11 +222,40 @@ class LocalSettings:
     def results_url(self) -> str:
         return self.service_url + RESULTS_PATH
 
-    def __repr__(self) -> str:  # 不让 token 出现在 repr 中
-        return (
-            f"LocalSettings(service_url={self.service_url!r}, token={REDACTED!r}, result_dir={str(self.result_dir)!r}, "
-            f"call_timeout_s={self.call_timeout_s!r}, result_ttl_h={self.result_ttl_h!r})"
-        )
+
+@dataclass(frozen=True)
+class LocalSettings:
+    envs: tuple[Environment, ...]  # 本项目可用的环境（至少一套），按项目文件或登记文件中的顺序
+    result_dir: Path  # 绝对路径
+    call_timeout_s: float
+    result_ttl_h: float
+    # 登记的全部环境名（清理结果目录时逐个处理其子目录）；为空时取 envs 的名字。
+    registered_env_names: tuple[str, ...] = ()
+    envs_file: Path | None = None  # 读取的环境登记文件；旧配置（环境变量）时为 None
+    project_file: Path | None = None  # 读取的项目文件；没有时为 None
+    warnings: tuple[str, ...] = ()  # 启动时写入运行日志的提示（不含 token）
+
+    def __post_init__(self) -> None:
+        if not self.envs:
+            raise ValueError("至少需要一套环境")
+
+    @property
+    def env_names(self) -> tuple[str, ...]:
+        return tuple(e.name for e in self.envs)
+
+    @property
+    def tokens(self) -> tuple[str, ...]:
+        return tuple(e.token for e in self.envs)
+
+    @property
+    def cleanup_env_names(self) -> tuple[str, ...]:
+        return self.registered_env_names or self.env_names
+
+    def find_env(self, name: str) -> Environment | None:
+        for env in self.envs:
+            if env.name == name:
+                return env
+        return None
 
 
 def _parse_service_url(value: str) -> str | None:
@@ -221,15 +289,118 @@ def _parse_positive(environ: Mapping[str, str], name: str, default: float, probl
     return value
 
 
-def load_settings(environ: Mapping[str, str] | None = None, cwd: str | os.PathLike[str] | None = None) -> LocalSettings:
-    """从环境变量读取配置；任一项缺失或不合法时抛出 SettingsError（列出全部问题，不含取值）。
+def _is_valid_token(value: object) -> bool:
+    return isinstance(value, str) and _TOKEN_PATTERN.fullmatch(value) is not None
 
-    空字符串视为未设置。LOG_MCP_RESULT_DIR 的相对路径按 cwd（默认为当前工作目录）解析为绝对路径。
+
+def _parse_description(value: object) -> str | None:
+    """单行、去掉首尾空白后 1–200 个字符、不含控制字符的说明；不符时返回 None。"""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or len(text) > _MAX_DESCRIPTION_LENGTH:
+        return None
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in text):
+        return None
+    return text
+
+
+_TOML_POSITION = re.compile(r"\(at (line \d+, column \d+|end of document)\)")
+
+
+def _load_toml(path: Path, label: str, problems: list[str]) -> dict[str, Any] | None:
+    """读取 TOML 文件；失败时记一条问题并返回 None。说明中只有位置，不含文件内容（其中可能有 token）。"""
+    try:
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+    except OSError as exc:
+        problems.append(f"无法读取{label} {path}（{type(exc).__name__}）")
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        match = _TOML_POSITION.search(str(exc))
+        where = f"，位置：{match.group(1)}" if match else ""
+        problems.append(f"{label} {path} 不是合法的 TOML{where}")
+    return None
+
+
+def _load_envs_file(path: Path, problems: list[str]) -> dict[str, Environment] | None:
+    """解析环境登记文件：只有 [envs.<名字>]，每项有且只有 description、service_url 与 token。
+
+    出错时记问题（只写文件路径、环境名与键名，不写取值）。没有登记任何环境或文件不可读时返回 None。
     """
-    env = os.environ if environ is None else environ
-    problems: list[str] = []
+    data = _load_toml(path, "环境登记文件", problems)
+    if data is None:
+        return None
+    where = f"环境登记文件 {path}"
+    unknown = sorted(set(data) - {"envs"})
+    if unknown:
+        problems.append(f"{where} 中有未知的项：{'、'.join(unknown)}（只能写 [envs.<环境名>]）")
+    table = data.get("envs")
+    if not isinstance(table, dict) or not table:
+        problems.append(f"{where} 中没有登记任何环境（每套环境写一节 [envs.<环境名>]）")
+        return None
+    envs: dict[str, Environment] = {}
+    for name, item in table.items():
+        if _ENV_NAME_PATTERN.fullmatch(name) is None:
+            problems.append(
+                f"{where} 中的环境名 {name!r} 不合法：只能用小写字母、数字与连字符，以字母或数字开头，最长 20 个字符"
+            )
+            continue
+        label = f"{where} 中的环境 {name}"
+        if not isinstance(item, dict):
+            problems.append(f"{label} 须写成一节 [envs.{name}]")
+            continue
+        extra = sorted(set(item) - _ENV_KEYS)
+        if extra:
+            problems.append(f"{label} 中有未知的项：{'、'.join(extra)}（只能有 description、service_url、token）")
+        description = _parse_description(item.get("description"))
+        if description is None:
+            problems.append(f"{label} 的 description 须为单行文字，不超过 {_MAX_DESCRIPTION_LENGTH} 个字符")
+        raw_url = item.get("service_url")
+        service_url = _parse_service_url(raw_url) if isinstance(raw_url, str) and raw_url else None
+        if service_url is None:
+            problems.append(f"{label} 的 service_url 须为 http:// 或 https:// 开头的基地址，不含用户名、密码、查询串与空白")
+        token = item.get("token")
+        if not _is_valid_token(token):
+            problems.append(f"{label} 的 token 缺失，或含空白、非 ASCII 字符")
+        if description is not None and service_url is not None and _is_valid_token(token) and not extra:
+            envs[name] = Environment(name=name, description=description, service_url=service_url, token=token)
+    return envs
 
+
+def _load_project_file(path: Path, problems: list[str]) -> list[str] | None:
+    """解析项目文件：只有 envs = ["<环境名>", ...]（至少一个、不重复）；不符时记问题并返回 None。"""
+    data = _load_toml(path, "项目文件", problems)
+    if data is None:
+        return None
+    where = f"项目文件 {path}"
+    unknown = sorted(set(data) - {"envs"})
+    if unknown:
+        problems.append(f"{where} 中有未知的项：{'、'.join(unknown)}（只能写 envs）")
+    names = data.get("envs")
+    if not isinstance(names, list) or not names or not all(isinstance(n, str) for n in names):
+        problems.append(f'{where} 须写 envs = ["<环境名>", ...]，至少一个')
+        return None
+    bad = [n for n in names if _ENV_NAME_PATTERN.fullmatch(n) is None]
+    if bad:
+        problems.append(f"{where} 中的环境名不合法：{'、'.join(repr(n) for n in bad)}")
+        return None
+    if len(set(names)) != len(names):
+        problems.append(f"{where} 中的环境名有重复")
+        return None
+    return names
+
+
+def _legacy_env(env: Mapping[str, str], envs_file: Path, problems: list[str]) -> Environment | None:
+    """旧配置：LOG_MCP_SERVICE_URL 与 LOG_MCP_TOKEN 组成名为 default 的一套环境。"""
     raw_url = env.get(ENV_SERVICE_URL, "")
+    token = env.get(ENV_TOKEN, "")
+    if raw_url == "" and token == "":
+        problems.append(
+            f"未找到环境登记文件 {envs_file}（写法见 README）；"
+            f"不用登记文件时须设置环境变量 {ENV_SERVICE_URL} 与 {ENV_TOKEN}"
+        )
+        return None
+    before = len(problems)
     service_url: str | None = None
     if raw_url == "":
         problems.append(f"缺少环境变量 {ENV_SERVICE_URL}（跳板机服务的基地址，例如 http://<跳板机地址>:8999）")
@@ -239,29 +410,99 @@ def load_settings(environ: Mapping[str, str] | None = None, cwd: str | os.PathLi
             problems.append(
                 f"环境变量 {ENV_SERVICE_URL} 须为 http:// 或 https:// 开头的基地址，不含用户名、密码、查询串与空白"
             )
-
-    token = env.get(ENV_TOKEN, "")
     if token == "":
         problems.append(f"缺少环境变量 {ENV_TOKEN}（由跳板机上的 Token_CLI 生成）")
-    elif _TOKEN_PATTERN.fullmatch(token) is None:
+    elif not _is_valid_token(token):
         problems.append(f"环境变量 {ENV_TOKEN} 含空白或非 ASCII 字符")
+    if len(problems) > before or service_url is None:
+        return None
+    return Environment(name=LEGACY_ENV_NAME, description=LEGACY_ENV_DESCRIPTION, service_url=service_url, token=token)
+
+
+def _permission_warning(path: Path) -> str | None:
+    """POSIX 上环境登记文件可被其他用户读取时给出提示；Windows 上不检查（ACL 不对应 mode 位）。"""
+    if os.name != "posix":
+        return None
+    try:
+        mode = os.stat(path).st_mode
+    except OSError:
+        return None
+    if mode & 0o077:
+        return f"环境登记文件 {path} 含 token，但其他用户也能读取，建议执行 chmod 600 {path}"
+    return None
+
+
+def load_settings(
+    environ: Mapping[str, str] | None = None,
+    cwd: str | os.PathLike[str] | None = None,
+    home: str | os.PathLike[str] | None = None,
+) -> LocalSettings:
+    """读取环境登记文件、项目文件与环境变量；任一项缺失或不合法时抛出 SettingsError（列出全部问题，不含取值）。
+
+    - 环境登记文件：LOG_MCP_ENVS_FILE（相对路径按 cwd 解析），未设置时为 ``<home>/.log-viewer-mcp/envs.toml``
+      （home 默认为当前用户的主目录）。显式指定的文件必须存在；默认位置没有文件时退回旧配置
+      （LOG_MCP_SERVICE_URL 与 LOG_MCP_TOKEN，环境名 default）。有登记文件时忽略这两个环境变量。
+    - 项目文件：``<cwd>/.log-viewer.toml``，限定本项目可用的环境；没有时可用全部登记的环境。
+    - LOG_MCP_RESULT_DIR、LOG_MCP_CALL_TIMEOUT_S、LOG_MCP_RESULT_TTL_H 照旧从环境变量读取（可省略）。
+
+    空字符串视为未设置。cwd 默认为当前工作目录。
+    """
+    env = os.environ if environ is None else environ
+    problems: list[str] = []
+    warnings: list[str] = []
+    base = Path(os.getcwd() if cwd is None else cwd)
 
     raw_dir = env.get(ENV_RESULT_DIR, "") or DEFAULT_RESULT_DIR
-    base = Path(os.getcwd() if cwd is None else cwd)
     result_dir = Path(os.path.abspath(base / raw_dir))
-
     call_timeout_s = _parse_positive(env, ENV_CALL_TIMEOUT_S, DEFAULT_CALL_TIMEOUT_S, problems)
     result_ttl_h = _parse_positive(env, ENV_RESULT_TTL_H, DEFAULT_RESULT_TTL_H, problems)
 
+    raw_file = env.get(ENV_ENVS_FILE, "")
+    if raw_file:
+        envs_file = Path(os.path.abspath(base / os.path.expanduser(raw_file)))
+    else:
+        envs_file = Path(Path.home() if home is None else home) / DEFAULT_ENVS_FILE
+
+    registered: dict[str, Environment] | None
+    used_file: Path | None = None
+    if raw_file or os.path.lexists(envs_file):
+        used_file = envs_file
+        registered = _load_envs_file(envs_file, problems)
+        if env.get(ENV_SERVICE_URL) or env.get(ENV_TOKEN):
+            warnings.append(f"已读取环境登记文件 {envs_file}，忽略环境变量 {ENV_SERVICE_URL} 与 {ENV_TOKEN}")
+        warning = _permission_warning(envs_file)
+        if warning:
+            warnings.append(warning)
+    else:
+        legacy = _legacy_env(env, envs_file, problems)
+        registered = {legacy.name: legacy} if legacy is not None else None
+
+    selected: list[Environment] = list(registered.values()) if registered else []
+    project_path = base / PROJECT_FILE
+    project_file: Path | None = None
+    if os.path.lexists(project_path):
+        names = _load_project_file(project_path, problems)
+        if names is not None and registered is not None:
+            missing = [n for n in names if n not in registered]
+            if missing:
+                where = str(used_file) if used_file is not None else f"{envs_file}（该文件不存在）"
+                problems.append(f"项目文件 {project_path} 中的环境 {'、'.join(missing)} 未在环境登记文件 {where} 中登记")
+            else:
+                selected = [registered[n] for n in names]
+                project_file = project_path
+
     if problems:
         raise SettingsError(problems)
-    assert service_url is not None
+    assert registered is not None and selected
     return LocalSettings(
-        service_url=service_url,
-        token=token,
+        envs=tuple(selected),
         result_dir=result_dir,
         call_timeout_s=call_timeout_s,
         result_ttl_h=result_ttl_h,
+        registered_env_names=tuple(registered),
+        envs_file=used_file,
+        project_file=project_file,
+        warnings=tuple(warnings),
     )
 
 
@@ -284,15 +525,22 @@ class _RedactingFormatter(logging.Formatter):
         return text
 
 
-def configure_logging(token: str | None = None, *, stream: Any = None) -> None:
-    """运行日志写标准错误（标准输出是 MCP 通道）；token 原文替换为 ***；httpx、httpcore 只记 WARNING 以上。
+def configure_logging(tokens: str | Iterable[str] | None = None, *, stream: Any = None) -> None:
+    """运行日志写标准错误（标准输出是 MCP 通道）；每个 token 的原文替换为 ***；httpx、httpcore 只记 WARNING 以上。
 
-    须在构造 FastMCP 之前调用（FastMCP 的 basicConfig 在根 logger 已有处理器时不生效）。
+    tokens 为一个 token 或多个（多套环境）。须在构造 FastMCP 之前调用（FastMCP 的 basicConfig 在根 logger
+    已有处理器时不生效）。
     """
+    if tokens is None:
+        secrets: tuple[str, ...] = ()
+    elif isinstance(tokens, str):
+        secrets = (tokens,)
+    else:
+        secrets = tuple(tokens)
+    # 先替换较长的：一个 token 恰好是另一个的子串时，不会留下较长者的残片。
+    secrets = tuple(sorted(set(secrets), key=len, reverse=True))
     handler = logging.StreamHandler(sys.stderr if stream is None else stream)
-    handler.setFormatter(
-        _RedactingFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s", (token,) if token else ())
-    )
+    handler.setFormatter(_RedactingFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s", secrets))
     logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
     for name in ("httpx", "httpcore"):
         logging.getLogger(name).setLevel(logging.WARNING)
@@ -314,11 +562,33 @@ def _tool(name: str, title: str, description: str, parameters: dict[str, Any]) -
     return tool.model_copy(update={"parameters": parameters})
 
 
-def build_tools() -> list[Tool]:
-    """与跳板机相同的两个工具；log_type 只声明为字符串，上限省略（由跳板机校验）。"""
+def env_input_schema(envs: tuple[Environment, ...]) -> dict[str, Any]:
+    """env 参数：enum 为本项目可用的环境，说明中逐个列出 description。"""
+    listing = "；".join(f"{e.name}：{e.description}" for e in envs)
+    if len(envs) == 1:
+        text = f"查询哪套环境（跳板机服务）。本项目只有一套，可省略：{listing}"
+    else:
+        text = (
+            f"查询哪套环境（跳板机服务），必填。可用取值：{listing}。"
+            "用户没说清查哪套环境（例如线上还是内网）时先问用户，不要猜"
+        )
+    return {"type": "string", "enum": [e.name for e in envs], "description": text}
+
+
+def _with_env(schema: dict[str, Any], envs: tuple[Environment, ...]) -> dict[str, Any]:
+    """在工具参数 schema 的最前面加上 env；可用环境多于一套时 env 必填。"""
+    out = {**schema, "properties": {ENV_PARAM: env_input_schema(envs), **schema["properties"]}}
+    required = ([ENV_PARAM] if len(envs) > 1 else []) + list(schema.get("required", []))
+    if required:
+        out["required"] = required
+    return out
+
+
+def build_tools(envs: tuple[Environment, ...]) -> list[Tool]:
+    """与跳板机相同的两个工具，多一个 env 参数；log_type 只声明为字符串，上限省略（由跳板机校验）。"""
     return [
-        _tool(SEARCH_LOGS, SEARCH_LOGS_TITLE, SEARCH_LOGS_DESCRIPTION, search_logs_input_schema()),
-        _tool(LIST_SERVERS, LIST_SERVERS_TITLE, LIST_SERVERS_DESCRIPTION, list_servers_input_schema()),
+        _tool(SEARCH_LOGS, SEARCH_LOGS_TITLE, SEARCH_LOGS_DESCRIPTION, _with_env(search_logs_input_schema(), envs)),
+        _tool(LIST_SERVERS, LIST_SERVERS_TITLE, LIST_SERVERS_DESCRIPTION, _with_env(list_servers_input_schema(), envs)),
     ]
 
 
@@ -386,6 +656,19 @@ def _summary_of(result: CallToolResult) -> dict[str, Any] | None:
     return None
 
 
+def _with_env_field(result: CallToolResult, env: Environment) -> CallToolResult:
+    """在返回给 Agent 的 JSON 对象顶层最前面加上 env（isError 不变）；内容不是 JSON 对象时原样返回。"""
+    data = _summary_of(result)
+    if data is None:
+        return result
+    out = {ENV_PARAM: env.name, **{k: v for k, v in data.items() if k != ENV_PARAM}}
+    return CallToolResult(
+        content=[TextContent(type="text", text=json.dumps(out, ensure_ascii=False))],
+        structuredContent=out,
+        isError=result.isError,
+    )
+
+
 def _is_within(base: str, path: str) -> bool:
     """path 是否位于 base 之内（不等于 base）；两者都应是 realpath。不同盘符等无法比较时视为不在其内。"""
     base_n, path_n = os.path.normcase(base), os.path.normcase(path)
@@ -445,6 +728,18 @@ _SECONDS_PER_HOUR = 3600.0
 def _is_reparse_point(st: os.stat_result) -> bool:
     """Windows 上的符号链接或 junction（lstat 可能把 junction 报告为目录）；POSIX 上恒为假。"""
     return bool(getattr(st, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _is_real_dir(path: str) -> bool:
+    """lstat 为真实目录（不是符号链接，Windows 上也不是 junction 等重解析点）；不存在或无法检查时为假。"""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        logger.warning("无法检查结果目录（%s）：%s", type(exc).__name__, path)
+        return False
+    return stat.S_ISDIR(st.st_mode) and not _is_reparse_point(st)
 
 
 def _ignore_missing(func: Any, path: str, exc: Any) -> None:
@@ -512,69 +807,108 @@ class LocalMCP(FastMCP):
     """
 
     def __init__(self, settings: LocalSettings, *, transport: httpx.AsyncBaseTransport | None = None) -> None:
-        super().__init__(name=SERVER_NAME, tools=build_tools())
+        super().__init__(name=SERVER_NAME, tools=build_tools(settings.envs))
         self.local_settings = settings
         self._transport = transport
 
-    def http_client(self) -> httpx.AsyncClient:
-        """新建一个访问跳板机的 httpx 客户端：带 Authorization 头，不跟随重定向（头不会被带到别处）。"""
+    def http_client(self, env: Environment) -> httpx.AsyncClient:
+        """新建一个访问 env 跳板机的 httpx 客户端：带该环境的 Authorization 头，不跟随重定向（头不会被带到别处）。"""
         return httpx.AsyncClient(
-            headers={"Authorization": f"Bearer {self.local_settings.token}"},
+            headers={"Authorization": f"Bearer {env.token}"},
             timeout=httpx.Timeout(self.local_settings.call_timeout_s),
             follow_redirects=False,
             transport=self._transport,
         )
 
     def cleanup_results(self) -> list[str]:
-        """删除 Local_Result_Dir 中过期的结果目录（4.8）；任何异常都只写运行日志，不影响启动与查询。"""
+        """删除 Local_Result_Dir 中过期的结果目录（4.8）；任何异常都只写运行日志，不影响启动与查询。
+
+        逐个处理登记环境的子目录 ``<Local_Result_Dir>/<env>/``（须为真实目录，不跟随符号链接与重解析点），
+        以及旧版本直接放在 ``<Local_Result_Dir>/`` 下的结果目录（环境名最长 20 个字符，不会被当作 Result_Handle）。
+        返回已删除的目录（相对 Local_Result_Dir，用 "/" 分隔）。
+        """
+        settings = self.local_settings
         try:
-            return cleanup_expired_results(self.local_settings.result_dir, self.local_settings.result_ttl_h)
+            removed = cleanup_expired_results(settings.result_dir, settings.result_ttl_h)
+            for name in settings.cleanup_env_names:
+                env_dir = os.path.join(settings.result_dir, name)
+                if _is_real_dir(env_dir):
+                    removed += [f"{name}/{h}" for h in cleanup_expired_results(env_dir, settings.result_ttl_h)]
+            return removed
         except Exception:
             logger.warning("清理过期结果目录失败", exc_info=True)
             return []
 
+    def _resolve_env(self, arguments: dict[str, Any] | None) -> tuple[Environment, dict[str, Any]]:
+        """按参数中的 env 选出环境，返回 (环境, 去掉 env 后的参数字典)；不合法时抛出 INVALID_ARGUMENT。
+
+        与跳板机的校验一致，env 为 null 视为未提供。只有一套环境时可省略。
+        """
+        envs = self.local_settings.envs
+        args = dict(arguments) if isinstance(arguments, dict) else {}
+        choices = "、".join(e.name for e in envs)
+        value = args.pop(ENV_PARAM, None)
+        if value is None:
+            if len(envs) == 1:
+                return envs[0], args
+            raise LogViewerError(ErrorCode.INVALID_ARGUMENT, f"缺少 env（查询哪套环境），可用取值：{choices}")
+        env = self.local_settings.find_env(value) if isinstance(value, str) else None
+        if env is None:
+            raise LogViewerError(ErrorCode.INVALID_ARGUMENT, f"env 不合法，可用取值：{choices}")
+        return env, args
+
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> CallToolResult:  # type: ignore[override]
         """转发一次工具调用；arguments 是 Agent 发来的原始参数字典。
+
+        先按 env 选出环境（不合法时直接返回 INVALID_ARGUMENT，不发请求、不清理），去掉 env 后其余参数原样转发给
+        该环境的跳板机。
 
         Service_Call_Timeout 从收到调用起算：deadline 在这里算出（anyio 时钟），等待跳板机的结果与
         之后的下载（任务 10.3，经 ``_handle_result``）共用同一个 deadline。search_logs 开始时先在工作线程中
         清理过期结果目录（4.8）。
 
-        转发失败时返回整次错误结果（isError 为真，内容为 {"error": {"code": …, "message": …}}），
+        转发失败时返回整次错误结果（isError 为真，内容为 {"env": …, "error": {"code": …, "message": …}}），
         原始异常只写运行日志（token 由日志格式化器替换）。被 Agent 取消时取消原样抛出，不转为错误结果；
         各层 async with 随之关闭会话与 HTTP 连接，断开传到跳板机（10.5）。
         """
         deadline = anyio.current_time() + self.local_settings.call_timeout_s
+        try:
+            env, forwarded = self._resolve_env(arguments)
+        except LogViewerError as error:
+            return _error_result(error)
         if name == SEARCH_LOGS:
             await anyio.to_thread.run_sync(self.cleanup_results)
         try:
             with anyio.fail_at(deadline):
-                result = await self._forward(name, arguments)
+                result = await self._forward(env, name, forwarded)
         except TimeoutError:
-            logger.warning("转发 %s 超时：%s 秒内没有收到跳板机的结果", name, self.local_settings.call_timeout_s)
-            return _error_result(LogViewerError(ErrorCode.SERVICE_UNAVAILABLE))
+            logger.warning("转发 %s 到环境 %s 超时：%s 秒内没有收到跳板机的结果", name, env.name,
+                           self.local_settings.call_timeout_s)
+            return _with_env_field(_error_result(LogViewerError(ErrorCode.SERVICE_UNAVAILABLE)), env)
         except Exception as exc:
             error = _error_for_exception(exc)
-            logger.warning("转发 %s 失败（%s）", name, error.code.value, exc_info=True)
-            return _error_result(error)
-        return await self._handle_result(name, result, deadline)
+            logger.warning("转发 %s 到环境 %s 失败（%s）", name, env.name, error.code.value, exc_info=True)
+            return _with_env_field(_error_result(error), env)
+        return _with_env_field(await self._handle_result(env, name, result, deadline), env)
 
-    async def _forward(self, name: str, arguments: dict[str, Any]) -> CallToolResult:
-        """新建客户端会话，initialize 后发送 tools/call，返回跳板机的结果；会话随即关闭。
+    async def _forward(self, env: Environment, name: str, arguments: dict[str, Any]) -> CallToolResult:
+        """新建到 env 跳板机的客户端会话，initialize 后发送 tools/call，返回跳板机的结果；会话随即关闭。
 
         时限由调用方的取消域控制（``call_tool`` 中的 deadline）。
         """
         request = types.ClientRequest(
             types.CallToolRequest(params=types.CallToolRequestParams(name=name, arguments=arguments))
         )
-        async with self.http_client() as http:
-            async with streamable_http_client(self.local_settings.mcp_url, http_client=http) as (read, write, _):
+        async with self.http_client(env) as http:
+            async with streamable_http_client(env.mcp_url, http_client=http) as (read, write, _):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     return await session.send_request(request, CallToolResult)
 
-    async def _handle_result(self, name: str, result: CallToolResult, deadline: float) -> CallToolResult:
-        """处理跳板机的结果：search_logs 成功时下载结果文件、删除跳板机上的结果并改写摘要（4.2、4.3、4.4）。
+    async def _handle_result(
+        self, env: Environment, name: str, result: CallToolResult, deadline: float
+    ) -> CallToolResult:
+        """处理 env 跳板机的结果：search_logs 成功时下载结果文件、删除跳板机上的结果并改写摘要（4.2、4.3、4.4）。
 
         list_servers 与整次错误的结果原样返回。下载在截止时刻为 deadline 的取消域内进行（与等待结果共用
         Service_Call_Timeout），之后的 DELETE 另限 ``DELETE_TIMEOUT_S`` 秒。
@@ -595,21 +929,21 @@ class LocalMCP(FastMCP):
         downloads: list[_Download] = []
         for index, entry in enumerate(servers):
             if isinstance(entry, dict) and entry.get("status") == "ok" and handle_ok:
-                download = self._plan_download(index, handle, entry)
+                download = self._plan_download(env, index, handle, entry)
                 if download is not None:
                     downloads.append(download)
 
         done: set[int] = set()
         if handle_ok:
-            async with self.http_client() as http:
+            async with self.http_client(env) as http:
                 with anyio.CancelScope(deadline=deadline) as scope:
                     for download in downloads:
-                        if await self._download(http, handle, download):
+                        if await self._download(http, env, handle, download):
                             done.add(download.index)
                 if scope.cancelled_caught:
                     logger.warning("下载结果超时：%s 秒内未完成，未完成的文件标为 DOWNLOAD_FAILED",
                                    self.local_settings.call_timeout_s)
-                await self._delete_results(http, handle)
+                await self._delete_results(http, env, handle)
 
         targets = {d.index: d.target for d in downloads}
         local_servers: list[Any] = []
@@ -624,10 +958,11 @@ class LocalMCP(FastMCP):
                 local_servers.append(_download_failed_entry(entry))
         return _json_result({**summary, "servers": local_servers})
 
-    def _plan_download(self, index: int, handle: str, entry: dict[str, Any]) -> _Download | None:
+    def _plan_download(self, env: Environment, index: int, handle: str, entry: dict[str, Any]) -> _Download | None:
         """按 4.7 校验文件名与字节数，并确认目标与 .part 的 realpath 位于 Local_Result_Dir 之内；不符时返回 None。
 
-        只读取路径信息（realpath），不创建、不写入任何文件。handle 已由调用方校验。
+        目标为 ``<Local_Result_Dir>/<env>/<handle>/<文件名>``（环境名已按格式校验）。只读取路径信息（realpath），
+        不创建、不写入任何文件。handle 已由调用方校验。
         """
         svr_id = entry.get("svr_id")
         file_name = entry.get("file")
@@ -639,19 +974,19 @@ class LocalMCP(FastMCP):
             logger.warning("svr_id %s 的结果字节数不合法，不下载", svr_id)
             return None
         base = os.path.realpath(self.local_settings.result_dir)
-        target = os.path.join(self.local_settings.result_dir, handle, file_name)
+        target = os.path.join(self.local_settings.result_dir, env.name, handle, file_name)
         for path in (target, target + PART_SUFFIX):
             if not _is_within(base, os.path.realpath(path)):
                 logger.warning("svr_id %s 的结果路径不在结果目录之内，不下载", svr_id)
                 return None
         return _Download(index, svr_id, file_name, expected, target)
 
-    async def _download(self, http: httpx.AsyncClient, handle: str, download: _Download) -> bool:
+    async def _download(self, http: httpx.AsyncClient, env: Environment, handle: str, download: _Download) -> bool:
         """下载一个结果文件：经 .part 写入，字节数一致后改名为正式文件。失败时删除 .part 并返回 False。
 
         取消（超时或 Agent 取消）时同样删除 .part，取消继续抛出。
         """
-        url = f"{self.local_settings.results_url}/{handle}/{download.file_name}"
+        url = f"{env.results_url}/{handle}/{download.file_name}"
         part = download.target + PART_SUFFIX
         created = False
         finished = False
@@ -685,9 +1020,9 @@ class LocalMCP(FastMCP):
             if created and not finished:
                 _unlink_quietly(part)
 
-    async def _delete_results(self, http: httpx.AsyncClient, handle: str) -> None:
+    async def _delete_results(self, http: httpx.AsyncClient, env: Environment, handle: str) -> None:
         """DELETE /results/<handle>（4.3），限时 DELETE_TIMEOUT_S 秒；失败只写运行日志。"""
-        url = f"{self.local_settings.results_url}/{handle}"
+        url = f"{env.results_url}/{handle}"
         with anyio.move_on_after(DELETE_TIMEOUT_S) as scope:
             try:
                 response = await http.delete(url)
@@ -710,15 +1045,26 @@ def _startup_failed(message: object) -> int:
     return 2
 
 
-def main(environ: Mapping[str, str] | None = None) -> int:
-    """`log-viewer-mcp-local`（或 `python -m log_viewer_mcp.local`）的入口：读取环境变量，以 stdio 运行 Local_MCP。"""
+def main(environ: Mapping[str, str] | None = None, *, home: str | os.PathLike[str] | None = None) -> int:
+    """`log-viewer-mcp-local`（或 `python -m log_viewer_mcp.local`）的入口：读取配置，以 stdio 运行 Local_MCP。
+
+    home 只供测试替换用户主目录（环境登记文件的默认位置）。
+    """
     try:
-        settings = load_settings(environ)
+        settings = load_settings(environ, home=home)
     except SettingsError as e:
         return _startup_failed(e)
-    configure_logging(settings.token)
+    configure_logging(settings.tokens)
+    for warning in settings.warnings:
+        logger.warning("%s", warning)
     server = LocalMCP(settings)
-    logger.info("Local_MCP 启动：跳板机 %s，结果目录 %s", settings.service_url, settings.result_dir)
+    logger.info(
+        "Local_MCP 启动：环境 %s（登记文件 %s，项目文件 %s），结果目录 %s",
+        "、".join(f"{e.name}={e.service_url}" for e in settings.envs),
+        settings.envs_file or "无，使用环境变量",
+        settings.project_file or "无",
+        settings.result_dir,
+    )
     server.cleanup_results()
     server.run(transport="stdio")
     return 0

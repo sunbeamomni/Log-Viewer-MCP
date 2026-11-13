@@ -6,7 +6,7 @@ compose 的 server-image 服务由 deploy/Dockerfile 构建，以镜像自己的
 
 在测试运行容器中：
 - 不带 token 访问 /mcp 返回 401；
-- 经 stdio 启动 log-viewer-mcp-local（LOG_MCP_SERVICE_URL 指向该服务），依次调用 list_servers 与 search_logs
+- 经 stdio 启动 log-viewer-mcp-local（环境登记文件中的环境 it 指向该服务），依次调用 list_servers 与 search_logs
   （与 test_e2e_smoke 相同的参数，时间窗口与真实时钟无关），本地结果文件与参照过滤逐字节相同；
 - 审计（以 root 写入的 0600 文件，经 ``sudo -n it-image-audit`` 读取只读挂载的 /image-audit）中有这两次调用的记录。
 
@@ -32,10 +32,12 @@ from tests.integration.itenv import ItEnv
 from tests.integration.test_e2e_smoke import (
     CALL_TIMEOUT_S,
     EXPECTED_FILES,
+    IT_ENV,
     PATTERNS,
     SEARCH_ARGS,
     _child_env,
     call_via_local,
+    write_env_files,
 )
 from tests.integration.test_remote_e2e import grep_ref
 from tests.integration.test_tools_integration import sample_content
@@ -75,9 +77,10 @@ async def test_image_smoke_via_local(it_env: ItEnv, samples, image_url: str, ima
     assert command is not None, "测试运行镜像中应已安装 log-viewer-mcp-local"
     work = tmp_path / "dev"
     work.mkdir()
+    home = write_env_files(tmp_path, work, image_url, image_token)
     params = StdioServerParameters(
         command=command, args=[], cwd=str(work),
-        env=_child_env(LOG_MCP_SERVICE_URL=image_url, LOG_MCP_TOKEN=image_token, LOG_MCP_RESULT_DIR="query_log"),
+        env=_child_env(HOME=str(home), LOG_MCP_RESULT_DIR="query_log"),
     )
     local_stderr = tmp_path / "local_stderr.log"
 
@@ -91,7 +94,9 @@ async def test_image_smoke_via_local(it_env: ItEnv, samples, image_url: str, ima
     db = AdminDbConfig(host=it_env.db_host, port=it_env.db_port, user=it_env.db_user,
                        database=it_env.db_name, password_file=None, password=it_env.db_password)
     db_rows = await AdminDb(db).list_servers()
-    assert listed.structuredContent == {"servers": db_rows}
+    assert listed.structuredContent["env"] == IT_ENV
+    assert listed.structuredContent["servers"] == db_rows
+    assert listed.structuredContent["server_timezone"] == "GMT-2"
 
     # search_logs：未配置 known_hosts 时照常登录 gs（8.8），本地文件与参照过滤逐字节相同（4.2）
     assert searched.isError is False, searched.content
@@ -102,7 +107,8 @@ async def test_image_smoke_via_local(it_env: ItEnv, samples, image_url: str, ima
     assert (entry["svr_id"], entry["status"], entry["error"]) == (1001, "ok", None)
     assert entry["files_read"] == EXPECTED_FILES and entry["files_skipped"] == []
     assert entry["bytes"] == len(expected) and entry["truncated"] == "none"
-    result_dir = (work / "query_log").resolve()
+    assert summary["env"] == IT_ENV
+    result_dir = (work / "query_log" / IT_ENV).resolve()
     local_path = Path(entry["local_path"])
     assert local_path.is_absolute() and local_path.resolve() == result_dir / handle / "1001_normal.log"
     assert local_path.read_bytes() == expected

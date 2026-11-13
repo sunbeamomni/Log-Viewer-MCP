@@ -34,6 +34,8 @@ from log_viewer_mcp.common.tool_docs import LIST_SERVERS_DESCRIPTION, SEARCH_LOG
 from log_viewer_mcp.local.main import (
     DEFAULT_CALL_TIMEOUT_S,
     DEFAULT_RESULT_TTL_H,
+    LEGACY_ENV_NAME,
+    Environment,
     LocalMCP,
     LocalSettings,
     SettingsError,
@@ -47,11 +49,14 @@ from tests.unit.test_app_http import REVOKED_TOKEN, TOKENS, VALID_TOKEN, lifespa
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SERVICE_URL = "http://testserver"
+# 只有一套环境（旧配置）时的环境名，结果下载到 query_log/<ENV>/<handle>/。
+ENV = LEGACY_ENV_NAME
 
 
 def settings(tmp_path, token: str = VALID_TOKEN, url: str = SERVICE_URL, call_timeout_s: float = 10.0) -> LocalSettings:
-    return LocalSettings(service_url=url, token=token, result_dir=tmp_path / "query_log",
-                         call_timeout_s=call_timeout_s, result_ttl_h=24.0)
+    env = Environment(name=ENV, description="测试用跳板机", service_url=url, token=token)
+    return LocalSettings(envs=(env,), result_dir=tmp_path / "query_log", call_timeout_s=call_timeout_s,
+                         result_ttl_h=24.0)
 
 
 def payload(result: CallToolResult) -> dict:
@@ -67,11 +72,14 @@ def payload(result: CallToolResult) -> dict:
 
 
 def test_load_settings_defaults_and_relative_result_dir(tmp_path) -> None:
-    s = load_settings({"LOG_MCP_SERVICE_URL": "http://10.0.0.5:8080/", "LOG_MCP_TOKEN": "tok-123"}, cwd=tmp_path)
-    assert s.service_url == "http://10.0.0.5:8080"
-    assert s.mcp_url == "http://10.0.0.5:8080/mcp"
-    assert s.results_url == "http://10.0.0.5:8080/results"
-    assert s.token == "tok-123"
+    s = load_settings({"LOG_MCP_SERVICE_URL": "http://10.0.0.5:8080/", "LOG_MCP_TOKEN": "tok-123"}, cwd=tmp_path,
+                      home=tmp_path)
+    (env,) = s.envs
+    assert env.name == "default" and s.envs_file is None and s.project_file is None
+    assert env.service_url == "http://10.0.0.5:8080"
+    assert env.mcp_url == "http://10.0.0.5:8080/mcp"
+    assert env.results_url == "http://10.0.0.5:8080/results"
+    assert env.token == "tok-123"
     assert s.result_dir == tmp_path / "query_log"
     assert s.call_timeout_s == DEFAULT_CALL_TIMEOUT_S
     assert s.result_ttl_h == DEFAULT_RESULT_TTL_H
@@ -81,9 +89,9 @@ def test_load_settings_defaults_and_relative_result_dir(tmp_path) -> None:
         {"LOG_MCP_SERVICE_URL": "https://jump.example:8443/base", "LOG_MCP_TOKEN": "t",
          "LOG_MCP_RESULT_DIR": os.path.join("out", "logs"), "LOG_MCP_CALL_TIMEOUT_S": "30",
          "LOG_MCP_RESULT_TTL_H": "0.5"},
-        cwd=tmp_path,
+        cwd=tmp_path, home=tmp_path,
     )
-    assert s.mcp_url == "https://jump.example:8443/base/mcp"
+    assert s.envs[0].mcp_url == "https://jump.example:8443/base/mcp"
     assert s.result_dir == tmp_path / "out" / "logs"
     assert s.result_dir.is_absolute()
     assert (s.call_timeout_s, s.result_ttl_h) == (30.0, 0.5)
@@ -91,7 +99,7 @@ def test_load_settings_defaults_and_relative_result_dir(tmp_path) -> None:
 
 def test_load_settings_reports_all_missing_required(tmp_path) -> None:
     with pytest.raises(SettingsError) as e:
-        load_settings({"LOG_MCP_SERVICE_URL": "", "LOG_MCP_RESULT_DIR": "x"}, cwd=tmp_path)
+        load_settings({"LOG_MCP_SERVICE_URL": "", "LOG_MCP_RESULT_DIR": "x"}, cwd=tmp_path, home=tmp_path)
     text = str(e.value)
     assert "LOG_MCP_SERVICE_URL" in text and "LOG_MCP_TOKEN" in text
 
@@ -116,15 +124,15 @@ def test_load_settings_reports_all_missing_required(tmp_path) -> None:
 def test_load_settings_rejects_invalid_values_without_echoing_them(tmp_path, overrides, variable) -> None:
     environ = {"LOG_MCP_SERVICE_URL": "http://host:8080", "LOG_MCP_TOKEN": "good-token", **overrides}
     with pytest.raises(SettingsError) as e:
-        load_settings(environ, cwd=tmp_path)
+        load_settings(environ, cwd=tmp_path, home=tmp_path)
     text = str(e.value)
     assert variable in text
     assert overrides[variable] not in text
 
 
-def test_main_without_required_env_exits_nonzero_and_hides_token(capsys) -> None:
+def test_main_without_required_env_exits_nonzero_and_hides_token(tmp_path, capsys) -> None:
     secret = "very-secret-token-value"
-    code = main({"LOG_MCP_TOKEN": secret})
+    code = main({"LOG_MCP_TOKEN": secret}, home=tmp_path)
     out, err = capsys.readouterr()
     assert code != 0
     assert out == ""
@@ -134,7 +142,7 @@ def test_main_without_required_env_exits_nonzero_and_hides_token(capsys) -> None
 
 def test_module_entry_exits_nonzero_with_message_on_stderr(tmp_path) -> None:
     env = {k: v for k, v in os.environ.items() if not k.startswith("LOG_MCP_")}
-    env["PYTHONPATH"] = str(REPO_ROOT)
+    env.update(PYTHONPATH=str(REPO_ROOT), HOME=str(tmp_path), USERPROFILE=str(tmp_path))  # 不读研发自己的 envs.toml
     proc = subprocess.run(
         [sys.executable, "-m", "log_viewer_mcp.local"], cwd=tmp_path, env=env, capture_output=True, timeout=60,
     )
@@ -200,9 +208,12 @@ async def test_tools_match_server_with_string_log_type(tmp_path) -> None:
     schema = tools["search_logs"].inputSchema
     assert schema["properties"]["log_type"]["type"] == "string"
     assert "enum" not in schema["properties"]["log_type"]
-    assert set(schema["properties"]) == set(server_tools["search_logs"].parameters["properties"])
+    # 比跳板机多一个 env（只有一套环境时可省略）；转发前去掉。
+    assert set(schema["properties"]) == set(server_tools["search_logs"].parameters["properties"]) | {"env"}
+    assert schema["properties"]["env"]["enum"] == [ENV]
     assert schema["required"] == ["svr_ids", "log_type"]
-    assert tools["list_servers"].inputSchema["properties"] == {}
+    assert set(tools["list_servers"].inputSchema["properties"]) == {"env"}
+    assert "required" not in tools["list_servers"].inputSchema
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +262,10 @@ async def test_list_servers_forwarded_with_bearer_token(served, tmp_path) -> Non
     result = await local.call_tool("list_servers", {})
     assert result.isError is False
     assert payload(result) == {
-        "servers": [{"svr_id": 1001, "svr_name": "S1", "zone": "eu", "ip_inner": "10.0.1.11", "is_test": 0}]
+        "env": ENV,
+        "server_timezone": "GMT-2",
+        "log_types": {name: t.dir for name, t in env.config.log_types.items()},
+        "servers": [{"svr_id": 1001, "svr_name": "S1", "zone": "eu", "ip_inner": "10.0.1.11", "is_test": 0}],
     }
     (record,) = audit_lines(env)
     assert record["user"] == "zhangsan" and record["tool"] == "list_servers"
@@ -314,7 +328,8 @@ async def test_search_logs_downloads_result_and_deletes_it_on_server(served, tmp
     handle = data["result_handle"]
     local_path = pathlib.Path(entry["local_path"])
     assert local_path.is_absolute()
-    assert local_path == tmp_path / "query_log" / handle / "1001_normal.log"
+    assert data["env"] == ENV
+    assert local_path == tmp_path / "query_log" / ENV / handle / "1001_normal.log"
     content = local_path.read_bytes()
     assert len(content) == entry["bytes"] > 0
     assert not local_path.with_name(local_path.name + ".part").exists()
@@ -503,6 +518,8 @@ async def test_stdio_lists_tools_and_reports_unreachable_service(tmp_path) -> No
         args=["-m", "log_viewer_mcp.local"],
         env={
             "PYTHONPATH": str(REPO_ROOT),
+            "HOME": str(tmp_path),
+            "USERPROFILE": str(tmp_path),
             "LOG_MCP_SERVICE_URL": "http://127.0.0.1:9",
             "LOG_MCP_TOKEN": secret,
             "LOG_MCP_CALL_TIMEOUT_S": "5",

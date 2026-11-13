@@ -112,6 +112,8 @@ docker compose exec log-viewer-mcp log-viewer-mcp-token revoke <token_id>
 
 把跳板机地址（例如 `http://10.0.0.5:8999`）和 token 一起交给研发。token 丢失无法找回，吊销后重新创建即可。
 
+每套环境（例如 A 项目线上、A 项目内网、B 项目内网）各部署一套服务，token 各自发放，一套环境的 token 不能用在另一套上。研发把每套环境登记在自己电脑的 `~/.log-viewer-mcp/envs.toml` 中，项目根目录的 `.log-viewer.toml` 按环境名引用它们（见根目录 README 的研发第 3 步与第 5 步）。所以同时把这套环境约定的**环境名**告诉研发，例如 `a-prod`，同一项目的研发要用相同的名字。
+
 ### 第 6 步：上线前检查
 
 1. 在一台游戏服上执行 `date +%z`。输出应与 `server_timezone` 一致，例如 `-02:00` 对应 `-0200`。

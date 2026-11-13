@@ -437,8 +437,13 @@ async def test_list_servers(env) -> None:
     services, _ = env
     result = await list_servers(services)
     assert not result.is_error
-    assert result.payload == {"servers": [{"svr_id": 1001, "svr_name": "S1", "zone": "eu", "ip_inner": IP_A,
-                                           "is_test": 0}]}
+    config = services.config
+    assert result.payload == {
+        "server_timezone": config.timezone_label,
+        "log_types": {name: t.dir for name, t in config.log_types.items()},
+        "servers": [{"svr_id": 1001, "svr_name": "S1", "zone": "eu", "ip_inner": IP_A, "is_test": 0}],
+    }
+    assert list(result.payload["log_types"]) == list(config.log_types)  # 按配置顺序
     services.db.fail = True
     result = await list_servers(services)
     assert result.is_error and result.payload == {"error": error_dict(ErrorCode.DB_UNAVAILABLE)}

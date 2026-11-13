@@ -19,7 +19,7 @@ import httpx
 import pytest
 
 from log_viewer_mcp.local.main import LocalMCP
-from tests.unit.test_local import payload, settings
+from tests.unit.test_local import ENV, payload, settings
 from tests.unit.test_local_cleanup import TTL_H, make_dir
 from tests.unit.test_local_download import CONTENTS, FAILED_ENTRY, HANDLE, ok_entry
 
@@ -120,9 +120,9 @@ def assert_no_token(token: str, result, caplog) -> None:
 
 @pytest.mark.asyncio
 async def test_search_logs_flow_downloads_deletes_and_cleans_expired(tmp_path, caplog) -> None:
-    """4.2、4.3、4.8：查询开始时清理过期目录；下载到 <Local_Result_Dir>/<handle>/ 后 DELETE；摘要只给本地路径。"""
+    """4.2、4.3、4.8：查询开始时清理过期目录；下载到 <Local_Result_Dir>/<env>/<handle>/ 后 DELETE；摘要只给本地路径。"""
     now = time.time()
-    result_dir = tmp_path / "query_log"
+    result_dir = tmp_path / "query_log" / ENV
     expired = make_dir(result_dir / EXPIRED_HANDLE, TTL_H + 1, now, {"1001_normal.log": b"old\n"})
     fresh = make_dir(result_dir / FRESH_HANDLE, 1, now, {"1001_normal.log": b"recent\n"})
     service = FakeService([ok_entry(1001), FAILED_ENTRY, ok_entry(1002)])
@@ -133,7 +133,8 @@ async def test_search_logs_flow_downloads_deletes_and_cleans_expired(tmp_path, c
 
     assert result.isError is False
     data = payload(result)
-    assert {k: v for k, v in data.items() if k != "servers"} == {
+    assert list(data)[0] == "env" and data["env"] == ENV
+    assert {k: v for k, v in data.items() if k not in ("servers", "env")} == {
         k: v for k, v in summary_payload([]).items() if k != "servers"}
     first, failed, second = data["servers"]
     for entry, name in ((first, "1001_normal.log"), (second, "1002_normal.log")):
@@ -184,7 +185,7 @@ async def test_search_logs_flow_failed_download_marks_download_failed(tmp_path, 
     assert failed["local_path"] is None and failed["bytes"] == 0 and failed["lines"] == 0
     assert ok["status"] == "ok"
     assert pathlib.Path(ok["local_path"]).read_bytes() == CONTENTS["1002_normal.log"]
-    assert tree(tmp_path / "query_log") == {HANDLE, f"{HANDLE}/1002_normal.log"}
+    assert tree(tmp_path / "query_log") == {ENV, f"{ENV}/{HANDLE}", f"{ENV}/{HANDLE}/1002_normal.log"}
     assert service.result_requests[-1] == ("DELETE", f"/results/{HANDLE}")
     assert_no_token(TOKEN, result, caplog)
 
@@ -206,6 +207,7 @@ async def test_search_logs_flow_rejected_call(tmp_path, caplog, token, mcp_statu
         result = await local.call_tool("search_logs", dict(ARGUMENTS))
 
     assert result.isError is True
+    assert payload(result)["env"] == ENV
     error = payload(result)["error"]
     assert error["code"] == code
     if code == "AUTH_FAILED":

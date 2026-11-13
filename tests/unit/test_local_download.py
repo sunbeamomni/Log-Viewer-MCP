@@ -18,7 +18,7 @@ import pytest
 from mcp.types import CallToolResult, TextContent
 
 from log_viewer_mcp.local.main import LocalMCP
-from tests.unit.test_local import payload, settings
+from tests.unit.test_local import ENV, payload, settings
 
 HANDLE = "q3Zr0V2m1yX8kD5sWb7aLg"
 TOKEN = "download-test-token-Q7"
@@ -86,7 +86,7 @@ async def handle(local: LocalMCP, result: CallToolResult, name: str = "search_lo
                  deadline: float | None = None) -> CallToolResult:
     if deadline is None:
         deadline = anyio.current_time() + local.local_settings.call_timeout_s
-    return await local._handle_result(name, result, deadline)
+    return await local._handle_result(local.local_settings.envs[0], name, result, deadline)
 
 
 def tree(root: pathlib.Path) -> set[str]:
@@ -112,7 +112,7 @@ async def test_downloads_all_files_then_deletes_handle(tmp_path, caplog) -> None
     assert data["result_handle"] == HANDLE and data["server_timezone"] == "GMT-2"
     out = data["servers"]
     assert [e["svr_id"] for e in out] == [1001, 1009, 1002, 1003]
-    handle_dir = tmp_path / "query_log" / HANDLE
+    handle_dir = tmp_path / "query_log" / ENV / HANDLE
     for entry in (out[0], out[2], out[3]):
         assert entry["status"] == "ok" and "file" not in entry
         path = pathlib.Path(entry["local_path"])
@@ -144,7 +144,7 @@ async def test_byte_count_mismatch_removes_partial_file(tmp_path, body) -> None:
     data = payload(await handle(local, summary([ok_entry(1001), ok_entry(1002)])))
     assert_download_failed(data["servers"][0])
     assert data["servers"][1]["status"] == "ok"
-    assert tree(tmp_path / "query_log" / HANDLE) == {"1002_normal.log"}
+    assert tree(tmp_path / "query_log" / ENV / HANDLE) == {"1002_normal.log"}
     assert fake.paths[-1] == ("DELETE", f"/results/{HANDLE}")
 
 
@@ -163,7 +163,7 @@ async def test_download_error_marks_download_failed_and_still_deletes(tmp_path, 
     data = payload(await handle(local, summary([ok_entry(1001), ok_entry(1002)])))
     assert_download_failed(data["servers"][0])
     assert data["servers"][1]["status"] == "ok"
-    assert tree(tmp_path / "query_log" / HANDLE) == {"1002_normal.log"}
+    assert tree(tmp_path / "query_log" / ENV / HANDLE) == {"1002_normal.log"}
     assert fake.paths[-1] == ("DELETE", f"/results/{HANDLE}")
 
 
@@ -177,7 +177,7 @@ async def test_error_mid_stream_removes_part_file(tmp_path) -> None:
     local = make_local(tmp_path, fake)
     data = payload(await handle(local, summary([ok_entry(1001)])))
     assert_download_failed(data["servers"][0])
-    assert tree(tmp_path / "query_log" / HANDLE) == set()
+    assert tree(tmp_path / "query_log" / ENV / HANDLE) == set()
     assert fake.paths[-1] == ("DELETE", f"/results/{HANDLE}")
 
 
@@ -207,8 +207,8 @@ async def test_invalid_file_name_is_not_downloaded(tmp_path, bad_file) -> None:
     assert_download_failed(data["servers"][0])
     assert data["servers"][1]["status"] == "ok"
     assert fake.paths == [("GET", f"/results/{HANDLE}/1002_normal.log"), ("DELETE", f"/results/{HANDLE}")]
-    assert tree(tmp_path) == {"query_log", os.path.join("query_log", HANDLE),
-                              os.path.join("query_log", HANDLE, "1002_normal.log")}
+    assert tree(tmp_path) == {"query_log", os.path.join("query_log", ENV), os.path.join("query_log", ENV, HANDLE),
+                              os.path.join("query_log", ENV, HANDLE, "1002_normal.log")}
 
 
 @pytest.mark.parametrize("bad_bytes", [-1, 1.0, True, "3", None])
@@ -228,10 +228,10 @@ async def test_handle_dir_symlink_outside_result_dir_is_refused(tmp_path) -> Non
     """realpath 不在 Local_Result_Dir 之内（handle 目录是指向外面的符号链接）时不写入。"""
     outside = tmp_path / "outside"
     outside.mkdir()
-    result_dir = tmp_path / "query_log"
-    result_dir.mkdir()
+    env_dir = tmp_path / "query_log" / ENV
+    env_dir.mkdir(parents=True)
     try:
-        os.symlink(outside, result_dir / HANDLE, target_is_directory=True)
+        os.symlink(outside, env_dir / HANDLE, target_is_directory=True)
     except (OSError, NotImplementedError):
         pytest.skip("当前环境不能创建符号链接")
     fake = FakeResults()
@@ -260,7 +260,7 @@ async def test_deadline_passed_marks_downloads_failed_and_still_deletes(tmp_path
     assert data["servers"][0]["status"] == "ok"
     assert_download_failed(data["servers"][1])
     assert_download_failed(data["servers"][2])
-    assert tree(tmp_path / "query_log" / HANDLE) == {"1001_normal.log"}
+    assert tree(tmp_path / "query_log" / ENV / HANDLE) == {"1001_normal.log"}
     assert fake.paths[-1] == ("DELETE", f"/results/{HANDLE}")
 
 
@@ -298,12 +298,12 @@ async def test_cancellation_removes_part_file_and_propagates(tmp_path) -> None:
     local = make_local(tmp_path, fake)
     task = asyncio.create_task(handle(local, summary([ok_entry(1001, size=100)])))
     await asyncio.wait_for(first_chunk_written.wait(), 5)
-    part = tmp_path / "query_log" / HANDLE / "1001_normal.log.part"
+    part = tmp_path / "query_log" / ENV / HANDLE / "1001_normal.log.part"
     assert part.exists()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert tree(tmp_path / "query_log" / HANDLE) == set()
+    assert tree(tmp_path / "query_log" / ENV / HANDLE) == set()
 
 
 @pytest.mark.asyncio

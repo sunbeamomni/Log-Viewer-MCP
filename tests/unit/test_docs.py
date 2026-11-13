@@ -1,7 +1,7 @@
 """客户端配置示例、SKILL.md 与 README 的检查（任务 12.3；需求 1.8、4.1、4.9、4.11）。
 
-- examples/ 下 Kiro、Claude Code、Codex 的配置能被解析，启动 Local_MCP 的命令与环境变量名和 local/main.py 一致，
-  token 只是占位符；把占位符换成实际值后 Local_MCP 能读取这份环境变量。
+- examples/ 下 Kiro、Claude Code、Codex 的配置能被解析，只写启动 Local_MCP 的命令，不含地址与 token；
+  环境登记文件 envs.toml 的模板只有占位符，把占位符换成实际值后 Local_MCP 能读取它与项目文件 .log-viewer.toml。
 - SKILL.md 的 YAML 头只含简单的 name 与 description（不依赖 PyYAML：逐行按 `键: 值` 解析，并排除会改变
   YAML 含义的写法），正文与 search_logs 的工具说明（common/tool_docs.py）一致。
 - README 中的相对链接都指向仓库中存在的文件。
@@ -25,15 +25,11 @@ SKILL_FILE = SKILL_DIR / "SKILL.md"
 README = ROOT / "README.md"
 
 SERVER_NAME = "log-viewer"
-LOCAL_ENV = {
-    local_main.ENV_SERVICE_URL,
-    local_main.ENV_TOKEN,
-    local_main.ENV_RESULT_DIR,
-    local_main.ENV_CALL_TIMEOUT_S,
-    local_main.ENV_RESULT_TTL_H,
-}
-TOKEN_PLACEHOLDERS = {"<token>", "${LOG_MCP_TOKEN}"}
-HOST_PLACEHOLDER = "<跳板机地址>"
+ENVS_EXAMPLE = EXAMPLES / "envs.toml"
+PROJECT_EXAMPLE = EXAMPLES / ".log-viewer.toml"
+# envs.toml 模板中的占位符：地址形如 <A 线上跳板机地址>，token 形如 <A 线上的 token>。
+HOST_PLACEHOLDER = re.compile(r"<[^<>]*跳板机地址>")
+TOKEN_PLACEHOLDER = re.compile(r"<[^<>]*token>")
 
 
 def _example_files() -> list[Path]:
@@ -76,25 +72,59 @@ def test_examples_do_not_use_uvx():
 
 
 @CLIENT_CONFIGS
-def test_example_env_matches_local_mcp_and_token_is_placeholder(load):
-    env = load()["env"]
-    assert set(env) <= LOCAL_ENV
-    assert {local_main.ENV_SERVICE_URL, local_main.ENV_TOKEN} <= set(env)
-    assert env[local_main.ENV_TOKEN] in TOKEN_PLACEHOLDERS
-    assert env[local_main.ENV_SERVICE_URL] == f"http://{HOST_PLACEHOLDER}:8999"
-    # LOG_MCP_RESULT_DIR 可省略；写出时与默认值一致。
-    assert env.get(local_main.ENV_RESULT_DIR, local_main.DEFAULT_RESULT_DIR) == local_main.DEFAULT_RESULT_DIR
+def test_example_has_no_address_or_token(load):
+    # 地址与 token 只写在 envs.toml 中；客户端配置可以提交到仓库（Claude Code 的项目级 .mcp.json）。
+    server = load()
+    assert "env" not in server
 
 
-@CLIENT_CONFIGS
-def test_example_env_is_accepted_after_filling_placeholders(load, tmp_path):
-    env = {
-        k: v.replace(HOST_PLACEHOLDER, "10.0.0.1").replace("${LOG_MCP_TOKEN}", "tk-example").replace("<token>", "tk-example")
-        for k, v in load()["env"].items()
-    }
-    settings = local_main.load_settings(env, cwd=tmp_path)
-    assert settings.mcp_url == "http://10.0.0.1:8999/mcp"
-    assert settings.result_dir == tmp_path / "query_log"
+def test_client_examples_do_not_mention_tokens_or_old_variables():
+    for path in _example_files():
+        text = path.read_text(encoding="utf-8")
+        for needle in ("<token>", local_main.ENV_TOKEN, local_main.ENV_SERVICE_URL, "跳板机地址>"):
+            assert needle not in text, (path, needle)
+
+
+def _envs_example() -> dict:
+    with open(ENVS_EXAMPLE, "rb") as f:
+        return tomllib.load(f)
+
+
+def test_envs_example_has_only_placeholders():
+    envs = _envs_example()["envs"]
+    assert list(envs) == ["a-prod", "a-dev", "b-dev"]
+    for name, item in envs.items():
+        assert set(item) == {"description", "service_url", "token"}, name
+        assert TOKEN_PLACEHOLDER.fullmatch(item["token"]), name
+        assert HOST_PLACEHOLDER.search(item["service_url"]), name
+
+
+def _fill_placeholders(text: str) -> str:
+    counter = iter(range(1, 100))
+    text = HOST_PLACEHOLDER.sub(lambda _: f"10.0.0.{next(counter)}", text)
+    return TOKEN_PLACEHOLDER.sub(lambda _: f"tk-example-{next(counter)}", text)
+
+
+def test_examples_are_accepted_after_filling_placeholders(tmp_path):
+    envs_file = tmp_path / "home" / local_main.DEFAULT_ENVS_FILE
+    envs_file.parent.mkdir(parents=True)
+    envs_file.write_text(_fill_placeholders(ENVS_EXAMPLE.read_text(encoding="utf-8")), encoding="utf-8")
+    project = tmp_path / "project"
+    project.mkdir()
+
+    # 没有项目文件：可用全部登记的环境。
+    settings = local_main.load_settings({}, cwd=project, home=tmp_path / "home")
+    assert settings.env_names == ("a-prod", "a-dev", "b-dev")
+    assert settings.envs_file == envs_file and settings.project_file is None
+    assert settings.envs[0].mcp_url == "http://10.0.0.1:8999/mcp"
+    assert settings.result_dir == project / "query_log"
+
+    # 项目文件模板限定为 A 项目的两套环境。
+    (project / local_main.PROJECT_FILE).write_bytes(PROJECT_EXAMPLE.read_bytes())
+    settings = local_main.load_settings({}, cwd=project, home=tmp_path / "home")
+    assert settings.env_names == ("a-prod", "a-dev")
+    assert settings.registered_env_names == ("a-prod", "a-dev", "b-dev")
+    assert PROJECT_EXAMPLE.name == local_main.PROJECT_FILE
 
 
 def test_codex_tool_timeout_covers_local_mcp_deadline():
@@ -136,7 +166,8 @@ def test_skill_front_matter_has_name_and_description():
     assert re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", fields["name"]) and len(fields["name"]) <= 64
     description = fields["description"]
     assert len(description) <= 1024
-    for phrase in ("SFS2X 日志", "秒级 Unix 时间戳", "GMT-2", SEARCH_LOGS, LIST_SERVERS):
+    for phrase in ("SFS2X 日志", "秒级 Unix 时间戳", "GMT-2", "server_timezone", "线上", "内网", SEARCH_LOGS,
+                   LIST_SERVERS):
         assert phrase in description
 
 
@@ -166,9 +197,15 @@ def test_skill_body_is_consistent_with_tool_description():
         "模式只作为 grep 的匹配内容",
         "分流出去的日志不会出现在 normal 里",
         "list_servers",
+        "server_timezone",
+        "log_types",
     ):
         assert phrase in SEARCH_LOGS_DESCRIPTION, phrase
         assert phrase in body, phrase
+    # 环境：SKILL.md 说明 env 的选法，且不再提示检查已不用的 LOG_MCP_SERVICE_URL。
+    assert "## 环境：先选 env" in body
+    assert "先问用户" in body and "query_log/<env>/" in body
+    assert local_main.ENV_SERVICE_URL not in body
     # log_type 与目录：工具说明中的每一项在 SKILL.md 的表格中有对应的一行。
     log_types = re.findall(r"^- ([a-z]+)：([a-z]+) 目录", SEARCH_LOGS_DESCRIPTION, re.M)
     assert [t for t, _ in log_types] == ["normal", "login", "analysis", "pulsar"]

@@ -1,0 +1,24 @@
+# 环境登记文件：复制到 ~/.log-viewer-mcp/envs.toml（Windows 为 %USERPROFILE%\.log-viewer-mcp\envs.toml）后填写。
+# 文件里有 token：不要提交到任何仓库；macOS / Linux 上执行 chmod 600 ~/.log-viewer-mcp/envs.toml。
+#
+# 每套跳板机服务（每个项目的线上、内网等环境）写一节 [envs.<环境名>]，用不到的删掉：
+#   环境名        小写字母、数字与连字符，以字母或数字开头，最长 20 个字符。助手调用工具时用它选择环境，
+#                 结果放在 query_log/<环境名>/ 下。项目文件 .log-viewer.toml 里会写环境名，同一项目的同事要用相同的名字
+#   description  给助手看的说明：写清是哪个项目、线上还是内网，助手据此判断用户要查哪套环境
+#   service_url  这套跳板机服务的地址，向运维要
+#   token        你在这套跳板机上的 token，向运维要；每套跳板机各自发放，不能混用
+
+[envs.a-prod]
+description = "A 项目线上"
+service_url = "http://<A 线上跳板机地址>:8999"
+token = "<A 线上的 token>"
+
+[envs.a-dev]
+description = "A 项目内网"
+service_url = "http://<A 内网跳板机地址>:8999"
+token = "<A 内网的 token>"
+
+[envs.b-dev]
+description = "B 项目内网"
+service_url = "http://<B 内网跳板机地址>:8999"
+token = "<B 内网的 token>"
